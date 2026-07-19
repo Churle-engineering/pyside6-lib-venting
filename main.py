@@ -5,7 +5,7 @@ from information import FIRE_PROPERTIES, COMBINED_INPUTS, POOL_SPREAD_DATA, REQ_
 from pdf import pdf_results
 import sys
 import numpy as np
-from buttons import clear_all_scenarios, data_submission, load_excel_data
+from LIB_funcs import clear_all_scenarios, data_submission, load_excel_data
 from miscfunc import load_file, import_gas_flowrate_data, generate_input_template
 import display_popup as display_popup_module
 from resulttable import open_results_table_window
