@@ -18,11 +18,6 @@ from calculations import (
 )
 from sprinkler import activation_time_Calc
 
-# from calculations import flammability_assessment_calc_graphical_method, flammability_assessment_calc, toxicity_assessment_calc, determine_calc_method
-# from spill&poolfire import x
-# from saveload import save_program_state, load_program_state
-
-
 # ---------------------------------------------------------------------------
 # Theme definitions – applied globally via QApplication.setStyleSheet().
 # Add QPushButton#clearAllButton entries to every theme so the button stays
@@ -228,12 +223,16 @@ class IntroPage(QWidget):
         button4 = QPushButton("Sprinkler Activation Time")
         button4.setToolTip("Click here to open the Sprinkler Activation Time Calculator.")
         button4.clicked.connect(lambda: self.base_window.show_page("SprinklerPage"))
+        
+        receptor = QPushButton("Receptor Heat Flux")
+        receptor.setToolTip("Click here to open the Receptor Heat Flux Calculator.")
+        receptor.clicked.connect(lambda: self.base_window.show_page("ReceptorHeatFluxPage"))
 
         # Uniform font and size for all four action buttons
         btn_font = QFont()
         btn_font.setPointSize(13)
         btn_font.setBold(True)
-        for btn in (button, button2, button3, button4):
+        for btn in (button, button2, button3, button4, receptor):
             btn.setMinimumSize(300, 110)
             btn.setFont(btn_font)
 
@@ -243,7 +242,8 @@ class IntroPage(QWidget):
         btn_grid.addWidget(button,  0, 0)   # LIB Modelling Tool
         btn_grid.addWidget(button4, 0, 1)   # Sprinkler Activation Time
         btn_grid.addWidget(button3, 1, 0)   # Pool Spill & Fire
-        btn_grid.addWidget(button2, 1, 1)   # Tutorial
+        btn_grid.addWidget(button2, 2, 0, 1, 2)   # Tutorial
+        btn_grid.addWidget(receptor, 1, 1)  # Receptor Heat Flux (spans two columns)
 
         # Outer layout: title + button grid
         layout = QVBoxLayout(self)
@@ -1018,6 +1018,32 @@ class PoolSpillPage(QWidget):
 
     def toggle_optional_inputs(self):
         self.optional_group.setVisible(self.oi_tickbox.isChecked())
+
+
+class ReceptorHeatFlux(QWidget):
+    """Placeholder window for the Receptor Heat Flux calculator."""
+    def __init__(self, base_window):
+        super().__init__()
+        self.base_window = base_window
+        
+        emissive_power = QLineEdit()
+        emissive_power.setToolTip("Enter the emissive power in kW/m².\nMust be greater than 0.")
+        
+        perpendicular_distance = QLineEdit()
+        perpendicular_distance.setToolTip("Enter the perpendicular distance from the fire source to the receptor in meters.\nMust be greater than 0.")
+        
+        
+
+        label = QLabel("Receptor Heat Flux Calculator\n\nThis feature is not yet implemented.")
+        font = label.font()
+        font.setPointSize(18)
+        font.setBold(True)
+        label.setFont(font)
+        label.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(label)
+
                
 if __name__ == "__main__": 
     app = QApplication([])
@@ -1030,6 +1056,7 @@ if __name__ == "__main__":
     tutorial_page = TutorialPage(window)
     sprinkler_page = SprinklerPage(window)
     pool_spill_page = PoolSpillPage(window)
+    receptor_heat_flux_page = ReceptorHeatFlux(window)
 
     # Register pages
     window.add_page("IntroPage", intro_page)
@@ -1037,6 +1064,7 @@ if __name__ == "__main__":
     window.add_page("TutorialPage", tutorial_page)
     window.add_page("SprinklerPage", sprinkler_page)
     window.add_page("PoolSpillPage", pool_spill_page)
+    window.add_page("ReceptorHeatFluxPage", receptor_heat_flux_page)
 
     # Initially display the intro page
     window.show_page(

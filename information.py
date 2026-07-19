@@ -33,15 +33,14 @@ INPUT_SCHEMA = {
     "battery_charge":       ("Battery Charge (%)",           float, 100),
     "vent_switch_conc":     ("Vent Switch Conc (%)",         float, 0),
     "emergency_vent_rate":  ("Emergency Vent Rate (L/s/m2)", float, 0),
-    "co":                   ("Carbon Monoxide (ppm)", float, 0),
-    "co2":                  ("Carbon Dioxide (ppm)", float, 0),
-    "h2":                   ("Hydrogen (ppm)", float, 0),
-    "total_hydrocarbons":   ("Total Hydrocarbons (ppm)", float, 0),
+    "co":                   ("Carbon Monoxide (%)", float, 0),
+    "co2":                  ("Carbon Dioxide (%)", float, 0),
+    "h2":                   ("Hydrogen (%)", float, 0),
+    "total_hydrocarbons":   ("Total Hydrocarbons (%)", float, 0),
 }
 
 COMBINED_INPUTS = [key for key, _, _ in INPUT_SCHEMA.values()]
 TEXT_INPUT_KEYS = {key for key, _, _ in INPUT_SCHEMA.values()}
-print("COMBINED_INPUTS:", TEXT_INPUT_KEYS)
 
 GAS_LABEL_FIX = {
     "hcl": "HCl",

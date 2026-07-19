@@ -35,14 +35,23 @@ def normalize_gas_key(label):
     text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
     if text.endswith("_ppm"):
         text = text[:-4]
+    if text.endswith("_mg_l"):
+        text = text[:-5]
+    if text.endswith("_v_v"):
+        text = text[:-4]
 
     aliases = {
         "carbon_monoxide": "co",
+        "carbon_monoxide_gas": "co",
         "hydrogen": "h2",
+        "hydrogen_gas": "h2",
         "carbon_dioxide": "co2",
         "co2": "co2",
+        "thc": "total_hydrocarbons",
+        "total_hc": "total_hydrocarbons",
         "total_hydrocarbon": "total_hydrocarbons",
         "total_hydrocarbons": "total_hydrocarbons",
+        "hydrocarbons_total": "total_hydrocarbons",
     }
     return aliases.get(text, text)
 

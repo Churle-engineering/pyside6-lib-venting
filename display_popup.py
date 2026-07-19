@@ -1,4 +1,41 @@
+import re
+
 from information import COMBINED_INPUTS
+
+
+FLAMMABLE_GAS_CANONICAL_ORDER = ["co", "h2", "total_hydrocarbons"]
+FLAMMABLE_GAS_LABELS = {
+    "co": "CO",
+    "h2": "H2",
+    "total_hydrocarbons": "Total Hydrocarbons",
+}
+FLAMMABLE_GAS_ALIASES = {
+    "co": "co",
+    "carbon_monoxide": "co",
+    "carbon_monoxide_gas": "co",
+    "h2": "h2",
+    "hydrogen": "h2",
+    "hydrogen_gas": "h2",
+    "thc": "total_hydrocarbons",
+    "total_hc": "total_hydrocarbons",
+    "total_hydrocarbon": "total_hydrocarbons",
+    "total_hydrocarbons": "total_hydrocarbons",
+    "hydrocarbons_total": "total_hydrocarbons",
+}
+
+
+def _normalize_popup_gas_key(label):
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", str(label).strip().lower())
+    text = re.sub(r"_\([^)]*\)$", "", text)
+    text = text.replace("%", "")
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    if text.endswith("_ppm"):
+        text = text[:-4]
+    if text.endswith("_mg_l"):
+        text = text[:-5]
+    if text.endswith("_v_v"):
+        text = text[:-4]
+    return FLAMMABLE_GAS_ALIASES.get(text, text)
 
 
 def _build_summary_table(headers, row_data, groups):
@@ -81,7 +118,7 @@ def display_flammability_result_popup(flam_scenario_results, tree, gas_data, bat
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
         QApplication, QMessageBox, QDialog, QWidget, QFrame, QLabel, QPushButton,
-        QVBoxLayout, QHBoxLayout, QScrollArea, QScrollBar, QTabWidget
+        QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea, QScrollBar, QTabWidget, QCheckBox
     )
     from PySide6.QtGui import QFont
 
@@ -104,10 +141,28 @@ def display_flammability_result_popup(flam_scenario_results, tree, gas_data, bat
 
         fig = Figure(figsize=(7.5, 4.8), dpi=100)
         ax = fig.add_subplot(111)
+        individual_gas_labels = FLAMMABLE_GAS_CANONICAL_ORDER
+        gas_vv_columns = {}
+        for column in vv_df.columns:
+            if column == "Total Gas (v/v%)" or not column.endswith("(v/v%)"):
+                continue
+            gas_vv_columns.setdefault(_normalize_popup_gas_key(column), column)
+        available_gases = [gas for gas in individual_gas_labels if gas in gas_vv_columns]
+        gas_colors = {
+            "co": "#1f77b4",
+            "h2": "#2ca02c",
+            "total_hydrocarbons": "#9467bd",
+        }
+        gas_checkboxes = {}
+
+        gas_mgl_columns = {}
+        for column in mgl_df.columns:
+            if column == "Total Gas (mg/L)" or not column.endswith("(mg/L)"):
+                continue
+            gas_mgl_columns.setdefault(_normalize_popup_gas_key(column), column)
 
         if "Total Gas (v/v%)" not in vv_df.columns:
-            expected_vv_cols = ["co (v/v%)", "h2 (v/v%)", "total_hydrocarbons (v/v%)"]
-            present_vv_cols = [c for c in expected_vv_cols if c in vv_df.columns]
+            present_vv_cols = [gas_vv_columns[gas] for gas in individual_gas_labels if gas in gas_vv_columns]
             if not present_vv_cols:
                 present_vv_cols = [col for col in vv_df.columns if col.endswith("(v/v%)") and col != "Total Gas (v/v%)"]
             if present_vv_cols:
@@ -115,8 +170,7 @@ def display_flammability_result_popup(flam_scenario_results, tree, gas_data, bat
             else:
                 vv_df["Total Gas (v/v%)"] = 0
         if "Total Gas (mg/L)" not in mgl_df.columns:
-            expected_mgl_cols = ["co (mg/L)", "h2 (mg/L)", "total_hydrocarbons (mg/L)"]
-            present_mgl_cols = [c for c in expected_mgl_cols if c in mgl_df.columns]
+            present_mgl_cols = [gas_mgl_columns[gas] for gas in individual_gas_labels if gas in gas_mgl_columns]
             if not present_mgl_cols:
                 present_mgl_cols = [col for col in mgl_df.columns if col.endswith("(mg/L)") and col != "Total Gas (mg/L)"]
             if present_mgl_cols:
@@ -127,33 +181,105 @@ def display_flammability_result_popup(flam_scenario_results, tree, gas_data, bat
         vv_max_total_value = vv_df.loc[vv_df["Total Gas (v/v%)"].idxmax(), "Total Gas (v/v%)"]
         mgl_max_total_value = mgl_df.loc[mgl_df["Total Gas (mg/L)"].idxmax(), "Total Gas (mg/L)"]
 
-        ax.plot(vv_df["Time (s)"], vv_df["Total Gas (v/v%)"], label="Total Gas (v/v%)", linestyle='-', linewidth=2.5, color='black')
-
         import numpy as np
         lfl_curve_array = result_data.get("lfl_curve_array")
         lfl_curve_label = result_data.get("lfl_curve_label") or "LFL"
-        if lfl_curve_array is not None:
-            finite_mask = np.isfinite(lfl_curve_array)
-            if np.any(finite_mask):
-                ax.plot(vv_df["Time (s)"], lfl_curve_array, label=lfl_curve_label, linestyle='--', linewidth=2, color='darkorange')
-                y_top = max(vv_max_total_value, lfl_bat if lfl_bat else 0) * 1.15
-            else:
-                if lfl_bat:
-                    ax.axhline(y=lfl_bat, color='crimson', linestyle=':', linewidth=2, label=f"LFL ({lfl_bat}%)")
-                y_top = max(vv_max_total_value, lfl_bat if lfl_bat else 0) * 1.15
-        else:
-            if lfl_bat:
-                ax.axhline(y=lfl_bat, color='crimson', linestyle=':', linewidth=2, label=f"LFL ({lfl_bat}%)")
-            y_top = max(vv_max_total_value, lfl_bat if lfl_bat else 0) * 1.15
 
-        ax.set_ylim(bottom=0, top=y_top if y_top else 1)
-        ax.set_title(f"{scenario_name} — Gas Concentration Over Time", fontsize=12, fontweight='bold')
-        ax.set_xlabel("Time (s)", fontsize=10)
-        ax.set_ylabel("Concentration (v/v%)", fontsize=10)
-        ax.tick_params(labelsize=9)
-        ax.legend(fontsize=9, loc='best', framealpha=0.9)
-        ax.grid(True, linestyle='--', alpha=0.5)
-        fig.tight_layout()
+        controls_widget = QWidget(container)
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+
+        toggle_gas_options = QCheckBox("Show flammable gas visibility options", controls_widget)
+        toggle_gas_options.setChecked(False)
+        controls_layout.addWidget(toggle_gas_options)
+
+        gas_options_area = QScrollArea(controls_widget)
+        gas_options_area.setWidgetResizable(True)
+        gas_options_area.setVisible(False)
+        gas_options_area.setMaximumHeight(140)
+
+        gas_options_widget = QWidget()
+        gas_options_layout = QGridLayout(gas_options_widget)
+        gas_options_layout.setContentsMargins(0, 0, 0, 0)
+
+        def update_flammability_plot():
+            ax.clear()
+            y_candidates = [vv_max_total_value]
+
+            ax.plot(
+                vv_df["Time (s)"],
+                vv_df["Total Gas (v/v%)"],
+                label="Total Gas (v/v%)",
+                linestyle='-',
+                linewidth=2.5,
+                color='black'
+            )
+
+            selected_gases = [gas for gas in available_gases if gas_checkboxes.get(gas) and gas_checkboxes[gas].isChecked()]
+            for gas in selected_gases:
+                gas_col = gas_vv_columns[gas]
+                gas_series = vv_df[gas_col]
+                y_candidates.append(float(gas_series.max()))
+                ax.plot(
+                    vv_df["Time (s)"],
+                    gas_series,
+                    label=FLAMMABLE_GAS_LABELS.get(gas, gas),
+                    linestyle='-',
+                    linewidth=2,
+                    color=gas_colors.get(gas, 'gray')
+                )
+
+                individual_lfl = gas_data.get(gas, {}).get("lfl")
+                if individual_lfl is not None and individual_lfl > 0:
+                    y_candidates.append(float(individual_lfl))
+                    ax.axhline(
+                        y=individual_lfl,
+                        color=gas_colors.get(gas, 'gray'),
+                        linestyle=':',
+                        linewidth=1.8,
+                        label=f"{FLAMMABLE_GAS_LABELS.get(gas, gas)} LFL ({individual_lfl}%)"
+                    )
+
+            if lfl_curve_array is not None:
+                finite_mask = np.isfinite(lfl_curve_array)
+                if np.any(finite_mask):
+                    y_candidates.append(float(np.max(lfl_curve_array[finite_mask])))
+                    ax.plot(
+                        vv_df["Time (s)"],
+                        lfl_curve_array,
+                        label=lfl_curve_label,
+                        linestyle='--',
+                        linewidth=2,
+                        color='darkorange'
+                    )
+                elif lfl_bat:
+                    y_candidates.append(lfl_bat)
+                    ax.axhline(y=lfl_bat, color='crimson', linestyle=':', linewidth=2, label=f"LFL ({lfl_bat}%)")
+            elif lfl_bat:
+                y_candidates.append(lfl_bat)
+                ax.axhline(y=lfl_bat, color='crimson', linestyle=':', linewidth=2, label=f"LFL ({lfl_bat}%)")
+
+            y_top = max(y_candidates) * 1.15 if y_candidates else 1
+            ax.set_ylim(bottom=0, top=y_top if y_top else 1)
+            ax.set_title(f"{scenario_name} — Gas Concentration Over Time", fontsize=12, fontweight='bold')
+            ax.set_xlabel("Time (s)", fontsize=10)
+            ax.set_ylabel("Concentration (v/v%)", fontsize=10)
+            ax.tick_params(labelsize=9)
+            ax.legend(fontsize=9, loc='best', framealpha=0.9)
+            ax.grid(True, linestyle='--', alpha=0.5)
+            fig.tight_layout()
+            canvas.draw_idle()
+
+        for idx, gas in enumerate(available_gases):
+            gas_checkbox = QCheckBox(FLAMMABLE_GAS_LABELS.get(gas, gas), gas_options_widget)
+            gas_checkbox.setChecked(False)
+            gas_checkboxes[gas] = gas_checkbox
+            gas_checkbox.stateChanged.connect(lambda _state: update_flammability_plot())
+            gas_options_layout.addWidget(gas_checkbox, idx // 2, idx % 2)
+
+        gas_options_area.setWidget(gas_options_widget)
+        controls_layout.addWidget(gas_options_area)
+        toggle_gas_options.toggled.connect(gas_options_area.setVisible)
 
         canvas = FigureCanvasQTAgg(fig)
         canvas.setMinimumHeight(340)
@@ -162,9 +288,12 @@ def display_flammability_result_popup(flam_scenario_results, tree, gas_data, bat
         if layout is None:
             layout = QVBoxLayout(container)
             container.setLayout(layout)
+        layout.addWidget(controls_widget)
         layout.addWidget(canvas, 1)
         toolbar = NavigationToolbar2QT(canvas, container)
         layout.addWidget(toolbar)
+
+        update_flammability_plot()
 
         result_data["flam_plot_fig"] = fig
 
@@ -367,7 +496,7 @@ def display_toxicity_result_popup(tox_scenario_results, tree, tox_gas_labels, ga
             fig.tight_layout()
             canvas.draw_idle()
 
-        default_deselected_gases = {"methanol", "dmc", "c2h5f"}
+        default_deselected_gases = {"methanol", "dmc", "c2h5f", "propane", "h2o"}
         for idx, gas in enumerate(valid_gas_labels):
             gas_checkbox = QCheckBox(gas, gas_options_widget)
             gas_checkbox.setChecked(gas not in default_deselected_gases)
