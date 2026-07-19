@@ -517,3 +517,12 @@ FIRE_PROPERTIES = {
     'fire growth rate': {'slow': 0.00293, 'medium': 0.01172, 'fast': 0.04688, 'ultra fast': 0.1875},
 }
 
+# note that sprinkler RTI is selected in accordance with AS 2118.1:2017.
+#see section 1.3.4 of AS2118.1:2017 for more information on sprinkler RTI selection.  
+SPRINKLER_PROPERTIES = {
+    'sprinkler response time index': {'exposed quick': 50, 'exposed standard': 80, 'concealed quick': 150, 'concealed standard': 234},
+    'liquid colour code': {'red': 37, 'yellow': 48, 'green': 62},
+    'activation temperatures': {'red': 68, 'yellow': 79, 'green': 93}
+
+}
+

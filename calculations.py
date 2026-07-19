@@ -7,9 +7,11 @@ from PySide6.QtWidgets import QMessageBox
 
 from information import (
     BATTERY_CHEMISTRY_DATA,
+    CHEMICAL_PROPERTIES,
     MODULES_PER_DELAY,
     CALCULATION_METHODS,
     COMBINED_INPUTS,
+    FIRE_PROPERTIES,
     get_specific_capacity,
     CO_TEMPERATURE_LFL_PARAMETER_A,
     CO_TEMPERATURE_LFL_PARAMETER_B,
@@ -55,6 +57,20 @@ def resolve_flammable_gas_inputs(data):
                 resolved.append((label, canonical))
                 break
     return resolved
+
+
+def resolve_lfl_curve_labels(labels):
+    """Return canonical flammable-gas labels and their source row indices."""
+    index_by_gas = {}
+    for index, label in enumerate(labels):
+        index_by_gas.setdefault(normalize_gas_key(label), index)
+
+    names = [
+        gas
+        for gas in ("co", "h2", "total_hydrocarbons")
+        if gas in index_by_gas
+    ]
+    return names, [index_by_gas[gas] for gas in names]
 
 
 def is_string_field(label):
@@ -181,6 +197,41 @@ def _iter_scenarios(state, scenario_data=None):
     return []
 
 
+def _parse_scenario_inputs(data, propagation_delay_default=0.0):
+    """Convert one spreadsheet row into the shared calculation input shape."""
+    def number(column, *aliases, default=0.0):
+        for label in (column, *aliases):
+            if label in data:
+                return _coerce_scalar(data[label], default)
+        return default
+
+    return {
+        "total_duration": int(number("Calculation Duration (s)")),
+        "time_step": int(number("Time Step (s)", default=1.0)),
+        "ventilation_rate": number("Ventilation Rate (L/s/m2)"),
+        "room_height": number("Room Height (m)"),
+        "room_area": number("Room Area (m2)"),
+        "equip_space": number("Equipment Space (%)"),
+        "cell_volume": number("cell_volume_(l)"),
+        "cell_duration": number("cell_duration_(s)"),
+        "module_volume": number("module_volume_(l)"),
+        "module_duration": number("module_duration_(s)"),
+        "cells": number("Cells per module", "Cells per"),
+        "modules": number("Modules per unit", "Modules per"),
+        "units": number("Units"),
+        "lfl_percent": number("LFL (%)", "lfl_(%)"),
+        "propagation_delay": number(
+            "Module Propagation Delay (s)", default=propagation_delay_default
+        ),
+        "module_capacity": number("module_capacity_(kwh)"),
+        "vent_switch_conc": number("Vent Switch Conc (%)"),
+        "emergency_vent_rate": number("Emergency Vent Rate (L/s/m2)"),
+        "co2_percent": number("co2_(%)", "CO2 (%)") / 100.0,
+        "venting_temperature": number("venting_temperature_(°c)"),
+        "lib_type": str(data.get("LIB Type", "NMC") or "NMC"),
+    }
+
+
 def calc_active_modules_array(time_array, total_mods, propagation_delay, mod_duration, modules_per_delay=MODULES_PER_DELAY):
     """Vectorized module activity profile for the simulation."""
     active = np.zeros(len(time_array), dtype=np.float64)
@@ -243,6 +294,30 @@ def validate_densities(gas_labels, gas_percents, gas_data, normalize_fn=None):
     return valid_labels, np.array(valid_percents, dtype=float), np.array(densities, dtype=float)
 
 
+def resolve_toxic_gas_densities(tox_gas_composition):
+    """Return toxic components that have usable canonical density data."""
+    gas_labels = []
+    gas_percents = []
+    densities = []
+
+    for label, percent in tox_gas_composition.items():
+        gas_key = normalize_gas_key(label)
+        density = CHEMICAL_PROPERTIES.get(gas_key, {}).get("density")
+        if density is not None and density > 0:
+            gas_labels.append(label)
+            gas_percents.append(float(percent) / 100.0)
+            densities.append(float(density))
+
+    if not gas_labels:
+        return None
+
+    return (
+        gas_labels,
+        np.array(gas_percents, dtype=float),
+        np.array(densities, dtype=float),
+    )
+
+
 def resolve_target_gas_index(valid_gas_labels, state):
     target_gas_map = {"CO": "co", "H2": "h2", "Total Hydrocarbons": "total_hydrocarbons"}
     selected_target = _resolve_state_value(state, "selected_target_flam_gas", "CO")
@@ -302,24 +377,25 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
 
     for scenario_name, data in scenarios:
         try:
-            total_duration = int(float(data.get("Calculation Duration (s)", 0)))
-            time_step = int(float(data.get("Time Step (s)", 1)))
-            ventilation_rate = float(data.get("Ventilation Rate (L/s/m2)", 0))
-            room_height = float(data.get("Room Height (m)", 0))
-            room_area = float(data.get("Room Area (m2)", 0))
-            equip_space = float(data.get("Equipment Space (%)", 0))
-            vol_battery = float(data.get("cell_volume_(l)", 0))
-            cell_duration = float(data.get("cell_duration_(s)", 0))
-            module_volume = float(data.get("module_volume_(l)", 0))
-            module_duration = float(data.get("module_duration_(s)", 0))
-            cells = float(data.get("Cells per module", data.get("Cells per", 0)))
-            modules = float(data.get("Modules per unit", data.get("Modules per", 0)))
-            units = float(data.get("Units", 0))
-            lib_type = data.get("LIB Type", "NMC")
-            propagation_delay = float(data.get("Module Propagation Delay (s)", 180))
-            mod_capacity = float(data.get("module_capacity_(kwh)", 0))
-            vent_switch_conc = float(data.get("Vent Switch Conc (%)", 0))
-            emergency_vent_rate = float(data.get("Emergency Vent Rate (L/s/m2)", 0))
+            inputs = _parse_scenario_inputs(data, propagation_delay_default=180.0)
+            total_duration = inputs["total_duration"]
+            time_step = inputs["time_step"]
+            ventilation_rate = inputs["ventilation_rate"]
+            room_height = inputs["room_height"]
+            room_area = inputs["room_area"]
+            equip_space = inputs["equip_space"]
+            vol_battery = inputs["cell_volume"]
+            cell_duration = inputs["cell_duration"]
+            module_volume = inputs["module_volume"]
+            module_duration = inputs["module_duration"]
+            cells = inputs["cells"]
+            modules = inputs["modules"]
+            units = inputs["units"]
+            lib_type = inputs["lib_type"]
+            propagation_delay = inputs["propagation_delay"]
+            mod_capacity = inputs["module_capacity"]
+            vent_switch_conc = inputs["vent_switch_conc"]
+            emergency_vent_rate = inputs["emergency_vent_rate"]
 
             user_selected_method = _resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A")
             calc_method, was_overridden = determine_calc_method(mod_capacity, user_selected_method)
@@ -343,20 +419,7 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
             chemistry_data = BATTERY_CHEMISTRY_DATA.get(lib_type_upper, BATTERY_CHEMISTRY_DATA.get("NMC", {}))
             lib_tox_gas_composition = chemistry_data.get("tox_gas_composition", {})
 
-            valid_gas_labels = [
-                label
-                for label in lib_tox_gas_composition.keys()
-                if strip_unit_suffix(str(label).strip().lower().replace(" ", "_")) in gas_data
-                and gas_data[strip_unit_suffix(str(label).strip().lower().replace(" ", "_"))].get("erpg-3", 0)
-            ]
-            gas_percents = np.array([float(lib_tox_gas_composition.get(label, 0)) / 100.0 for label in valid_gas_labels], dtype=float)
-
-            density_result = validate_densities(
-                valid_gas_labels,
-                gas_percents,
-                gas_data,
-                normalize_fn=lambda s: strip_unit_suffix(str(s).strip().lower().replace(" ", "_")),
-            )
+            density_result = resolve_toxic_gas_densities(lib_tox_gas_composition)
             if density_result is None:
                 raise ValueError("No toxic gases with valid density data were found")
 
@@ -482,26 +545,27 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
 
     for scenario_name, data in scenarios:
         try:
-            total_duration = int(float(data.get("Calculation Duration (s)", 0)))
-            time_step = int(float(data.get("Time Step (s)", 1)))
-            ventilation_rate = float(data.get("Ventilation Rate (L/s/m2)", 0))
-            room_height = float(data.get("Room Height (m)", 0))
-            room_area = float(data.get("Room Area (m2)", 0))
-            cell_vol_battery = float(data.get("cell_volume_(l)", 0))
-            cell_duration = float(data.get("cell_duration_(s)", 0))
-            module_volume = float(data.get("module_volume_(l)", 0))
-            module_duration = float(data.get("module_duration_(s)", 0))
-            modules = float(data.get("Modules per unit", data.get("Modules per", 0)))
-            equip_space = float(data.get("Equipment Space (%)", 0))
-            units = float(data.get("Units", 0))
-            cells = float(data.get("Cells per module", data.get("Cells per", 0)))
-            lfl_percent = float(data.get("LFL (%)", data.get("lfl_(%)", 0)))
-            propagation_delay = float(data.get("Module Propagation Delay (s)", 0))
-            lib_type = data.get("LIB Type", "NMC")
-            mod_capacity = float(data.get("module_capacity_(kwh)", 0))
-            vent_switch_conc = float(data.get("Vent Switch Conc (%)", 0))
-            emergency_vent_rate = float(data.get("Emergency Vent Rate (L/s/m2)", 0))
-            co2_percent = float(data.get("co2_(%)", data.get("CO2 (%)", 0))) / 100.0
+            inputs = _parse_scenario_inputs(data)
+            total_duration = inputs["total_duration"]
+            time_step = inputs["time_step"]
+            ventilation_rate = inputs["ventilation_rate"]
+            room_height = inputs["room_height"]
+            room_area = inputs["room_area"]
+            cell_vol_battery = inputs["cell_volume"]
+            cell_duration = inputs["cell_duration"]
+            module_volume = inputs["module_volume"]
+            module_duration = inputs["module_duration"]
+            modules = inputs["modules"]
+            equip_space = inputs["equip_space"]
+            units = inputs["units"]
+            cells = inputs["cells"]
+            lfl_percent = inputs["lfl_percent"]
+            propagation_delay = inputs["propagation_delay"]
+            lib_type = inputs["lib_type"]
+            mod_capacity = inputs["module_capacity"]
+            vent_switch_conc = inputs["vent_switch_conc"]
+            emergency_vent_rate = inputs["emergency_vent_rate"]
+            co2_percent = inputs["co2_percent"]
 
             user_selected_method = _resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A")
             calc_method, _ = determine_calc_method(mod_capacity, user_selected_method)
@@ -514,8 +578,8 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
                 lfl_val = gas_data.get(flam_label, {}).get("lfl", 0)
                 individual_lfls[idx] = lfl_val if lfl_val and lfl_val > 0 else 0
 
-            if use_temp_dependent_lfl and use_le_chatelier:
-                venting_temp = float(data.get("venting_temperature_(°c)", 0))
+            if use_temp_dependent_lfl:
+                venting_temp = inputs["venting_temperature"]
                 if venting_temp > 0:
                     temp_lfls = [
                         CO_TEMPERATURE_LFL_PARAMETER_A * venting_temp + CO_TEMPERATURE_LFL_PARAMETER_B,
@@ -625,36 +689,36 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
             adjusted_le_chatelier_lfl = None
             lfl_curve_label = None
             if use_le_chatelier or use_temp_dependent_lfl:
-                norm_labels = [strip_unit_suffix(str(label).strip().lower()) for label in valid_gas_labels]
-                name_to_row = {name: idx for idx, name in enumerate(norm_labels)}
-                used = [(name, name_to_row[name]) for name in ["co", "h2", "total_hydrocarbons"] if name in name_to_row]
-                if used:
-                    rows = [idx for _, idx in used]
-                    conc_flam = vv_concentrations[rows, :]
-                    total_flam_conc = conc_flam.sum(axis=0)
-                    lfl_lookup = {
-                        "co": individual_lfls[0],
-                        "h2": individual_lfls[1],
-                        "total_hydrocarbons": individual_lfls[2],
-                    }
-                    used_lfls = np.array([lfl_lookup[name] for name, _ in used], dtype=float)
-                    adjusted_le_chatelier_lfl = np.full(num_steps, np.nan)
-                    active_mask = total_flam_conc > 0
-                    if np.any(active_mask):
-                        fracs = conc_flam[:, active_mask] / total_flam_conc[active_mask]
-                        inv_lfls = np.where(used_lfls > 0, 1.0 / used_lfls, 0.0)
-                        denominator = inv_lfls @ fracs
-                        valid_denom = denominator > 0
-                        active_indices = np.where(active_mask)[0]
-                        valid_indices = active_indices[valid_denom]
-                        lfl_mix = 1.0 / denominator[valid_denom]
-                        adjusted_le_chatelier_lfl[valid_indices] = lfl_mix
-                    if use_temp_dependent_lfl and not use_le_chatelier:
-                        lfl_curve_label = "Temperature-adjusted LFL"
-                    else:
-                        lfl_curve_label = "Le Chatelier LFL"
+                if use_le_chatelier:
+                    names, rows = resolve_lfl_curve_labels(valid_gas_labels)
+                    if names:
+                        conc_flam = vv_concentrations[rows, :]
+                        total_flam_conc = conc_flam.sum(axis=0)
+                        lfl_lookup = {
+                            "co": individual_lfls[0],
+                            "h2": individual_lfls[1],
+                            "total_hydrocarbons": individual_lfls[2],
+                        }
+                        used_lfls = np.array([lfl_lookup[name] for name in names], dtype=float)
+                        adjusted_le_chatelier_lfl = np.full(num_steps, np.nan)
+                        active_mask = total_flam_conc > 0
+                        if np.any(active_mask):
+                            fracs = conc_flam[:, active_mask] / total_flam_conc[active_mask]
+                            inv_lfls = np.where(used_lfls > 0, 1.0 / used_lfls, 0.0)
+                            denominator = inv_lfls @ fracs
+                            valid_denom = denominator > 0
+                            active_indices = np.where(active_mask)[0]
+                            valid_indices = active_indices[valid_denom]
+                            lfl_mix = 1.0 / denominator[valid_denom]
+                            adjusted_le_chatelier_lfl[valid_indices] = lfl_mix
+                        lfl_curve_label = "Temperature-adjusted LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
+                        print(f"DEBUG: LFL curve generated; finite points={np.isfinite(adjusted_le_chatelier_lfl).sum()} label={lfl_curve_label}")
+                elif use_temp_dependent_lfl:
+                    adjusted_le_chatelier_lfl = np.full(num_steps, float(lfl_percent), dtype=float)
+                    lfl_curve_label = "Temperature-adjusted LFL"
+
+                if adjusted_le_chatelier_lfl is not None:
                     flam_result_vv_df["Le Chatelier LFL (v/v%)"] = adjusted_le_chatelier_lfl
-                    print(f"DEBUG: LFL curve generated; finite points={np.isfinite(adjusted_le_chatelier_lfl).sum()} label={lfl_curve_label}")
 
             combined_gas_percent = sum(float(data.get(label, 0)) / 100.0 for label in ["co_(%)", "h2_(%)", "total_hydrocarbons_(%)"])
             lfl_value = (lfl_percent * room_vol) / 100.0 if room_vol > 0 else 0
@@ -710,30 +774,34 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
     mod_duration = flowrate_matrix.shape[1]
     combined_flam_flowrates = flowrate_matrix[0] + flowrate_matrix[1] + flowrate_matrix[2]
 
-    flam_scenario_results = state.flam_scenario_results
+    flam_scenario_results = getattr(state, "flam_scenario_results", None)
+    if flam_scenario_results is None:
+        flam_scenario_results = {}
+        setattr(state, "flam_scenario_results", flam_scenario_results)
     flam_scenario_results.clear()
 
-    scenarios = parse_scenario_rows(state)
+    scenarios = _iter_scenarios(state, scenario_data)
 
     for scenario_name, data in scenarios:
         try:
-            total_duration = int(float(data.get("Calculation Duration (s)", 0)))
-            time_step = int(float(data.get("Time Step (s)", 1)))
-            ventilation_rate = float(data.get("Ventilation Rate (L/s/m2)", 0))
-            room_height = float(data.get("Room Height (m)", 0))
-            room_area = float(data.get("Room Area (m2)", 0))
-            modules = float(data.get("Modules per", 0))
-            equip_space = float(data.get("Equipment Space (%)", 0))
-            units = float(data.get("Units", 0))
-            lfl_percent = float(data.get("lfl_(%)", 0))
-            propagation_delay = float(data.get("Module Propagation Delay (s)", 0))
-            vent_switch_conc = float(data.get("Vent Switch Conc (%)", 0))
-            emergency_vent_rate = float(data.get("Emergency Vent Rate (L/s/m2)", 0))
+            inputs = _parse_scenario_inputs(data)
+            total_duration = inputs["total_duration"]
+            time_step = inputs["time_step"]
+            ventilation_rate = inputs["ventilation_rate"]
+            room_height = inputs["room_height"]
+            room_area = inputs["room_area"]
+            modules = inputs["modules"]
+            equip_space = inputs["equip_space"]
+            units = inputs["units"]
+            lfl_percent = inputs["lfl_percent"]
+            propagation_delay = inputs["propagation_delay"]
+            vent_switch_conc = inputs["vent_switch_conc"]
+            emergency_vent_rate = inputs["emergency_vent_rate"]
             k_co2 = 1.5
 
             # Le Chatelier's LFL option
-            use_le_chatelier = state.use_le_chatelier_lfl.get() if hasattr(state, 'use_le_chatelier_lfl') else False
-            use_temp_dependent_lfl = state.use_temp_dependent_lfl.get() if hasattr(state, 'use_temp_dependent_lfl') else False
+            use_le_chatelier = _bool_state_value(state, "use_le_chatelier_lfl", False)
+            use_temp_dependent_lfl = _bool_state_value(state, "use_temp_dependent_lfl", False)
 
             # Individual LFL values (% v/v)
             individual_lfls = np.zeros(3)
@@ -742,8 +810,8 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                 individual_lfls[idx] = lfl_val if lfl_val and lfl_val > 0 else 0
 
             # Temperature-dependent LFL adjustment
-            if use_temp_dependent_lfl and use_le_chatelier:
-                venting_temp = float(data.get("venting_temperature_(°c)", 0))
+            if use_temp_dependent_lfl:
+                venting_temp = inputs["venting_temperature"]
                 if venting_temp > 0:
                     temp_lfls = [
                         CO_TEMPERATURE_LFL_PARAMETER_A * venting_temp + CO_TEMPERATURE_LFL_PARAMETER_B,
@@ -801,7 +869,7 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
 
             # Resolve target gas for emergency ventilation
             target_gas_map = {"CO": 0, "H2": 1, "Total Hydrocarbons": 2}
-            selected_target = state.selected_target_flam_gas.get() if hasattr(state, 'selected_target_flam_gas') else "CO"
+            selected_target = _resolve_state_value(state, "selected_target_flam_gas", "CO")
             target_gas_index = target_gas_map.get(selected_target, 0)
 
             # === Pre-compute total inflow matrix for all timesteps (vectorized per group) ===
@@ -843,6 +911,7 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
 
     # === Le Chatelier's LFL calculation (vectorized) ===
             adjusted_le_chatelier_lfl = None
+            lfl_curve_label = None
             if use_le_chatelier:
                 conc_flam = vv_concentrations[:3, :]
                 total_flam_conc = conc_flam.sum(axis=0)
@@ -873,8 +942,14 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                     adjusted_lfl = np.where(needs_correction, adjusted_lfl, lfl_mix)
                     adjusted_le_chatelier_lfl[valid_indices] = adjusted_lfl
 
+                lfl_curve_label = "Temperature-adjusted LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
                 flam_result_vv_df["Le Chatelier LFL (v/v%)"] = adjusted_le_chatelier_lfl
                 print(f"Le Chatelier's LFL range: {np.nanmin(adjusted_le_chatelier_lfl):.4f}% - {np.nanmax(adjusted_le_chatelier_lfl):.4f}%")
+            elif use_temp_dependent_lfl:
+                adjusted_le_chatelier_lfl = np.full(num_steps, float(lfl_percent), dtype=float)
+                lfl_curve_label = "Temperature-adjusted LFL"
+                flam_result_vv_df["Le Chatelier LFL (v/v%)"] = adjusted_le_chatelier_lfl
+                print(f"Temperature-adjusted LFL set to user input threshold: {lfl_percent:.4f}%")
 
     # === Max module calculation (optimized using linearity of lfilter) ===
             lfl_value = (lfl_percent * room_vol) / 100
@@ -1021,7 +1096,9 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                 "flam_max_mod": flam_max_mods,
                 "input": data,
                 "use_le_chatelier": use_le_chatelier,
-                "le_chatelier_lfl_array": adjusted_le_chatelier_lfl if use_le_chatelier else None
+                "le_chatelier_lfl_array": adjusted_le_chatelier_lfl if (use_le_chatelier or use_temp_dependent_lfl) else None,
+                "lfl_curve_array": adjusted_le_chatelier_lfl if (use_le_chatelier or use_temp_dependent_lfl) else None,
+                "lfl_curve_label": lfl_curve_label,
             }
         except ZeroDivisionError:
             QMessageBox.critical(parent, "Calculation Error", f"{scenario_name} failed: Division by zero encountered.\nPlease check the input values.")
@@ -1031,11 +1108,6 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
             return
 
     # Display results
-    
-    if not getattr(state, "gas_flowrate_data", None):
-        QMessageBox.information(parent, "Flowrate Data", "No flowrate data was imported. Falling back to the standard flammability calculation.")
-        return flammability_assessment_calc(parent, state, display_flammability_result_popup, gas_data, bat_data, flam_gasses_labels, scenario_data=scenario_data)
-    
-    display_flammability_result_popup(flam_scenario_results, state.tree, gas_data, bat_data)
+    display_flammability_result_popup(flam_scenario_results, None, gas_data, bat_data, parent=parent)
 
 

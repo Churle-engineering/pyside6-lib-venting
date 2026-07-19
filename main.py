@@ -1,13 +1,14 @@
 from PySide6.QtWidgets import QApplication, QFormLayout, QFrame, QGroupBox, QLineEdit, QStackedWidget, QHeaderView, QCheckBox, QHBoxLayout, QInputDialog, QMainWindow, QDockWidget, QPushButton, QScrollArea, QSizePolicy, QTabBar, QTabWidget, QMessageBox, QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget, QLabel, QVBoxLayout, QGridLayout, QTextEdit, QSlider, QProgressBar, QComboBox, QListWidget, QRadioButton
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon, QAction
-from information import COMBINED_INPUTS, POOL_SPREAD_DATA, REQ_LIB_INFO, USER_INPUTS, CALCULATION_METHODS, _THEMES, POOL_PROPERTIES, BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES, FLAMMABLE_GASES
+from information import FIRE_PROPERTIES, COMBINED_INPUTS, POOL_SPREAD_DATA, REQ_LIB_INFO, USER_INPUTS, CALCULATION_METHODS, _THEMES, POOL_PROPERTIES, BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES, FLAMMABLE_GASES
 from pdf import pdf_results
 import sys
 import numpy as np
 from buttons import clear_all_scenarios, data_submission, load_excel_data
 from miscfunc import load_file, import_gas_flowrate_data, generate_input_template
 import display_popup as display_popup_module
+from resulttable import open_results_table_window
 from calculations import (
     is_string_field,
     toxicity_assessment_calc,
@@ -15,6 +16,7 @@ from calculations import (
     flammability_assessment_calc_graphical_method,
     determine_calc_method,
 )
+from sprinkler import activation_time_Calc
 
 # from calculations import flammability_assessment_calc_graphical_method, flammability_assessment_calc, toxicity_assessment_calc, determine_calc_method
 # from spill&poolfire import x
@@ -335,18 +337,6 @@ class SpreadsheetWidget(QWidget):
         self.table.blockSignals(False)  # Prevent recursive calls to on_cell_changed
         print(f"start {self.scenario_data}")
 
-    def normalized_scenarios(self):
-        """Return all non-empty scenarios mapped to canonical INPUT_SCHEMA keys."""
-        return normalize_scenario_data(self.scenario_data)
-
-    def scenario_value(self, scenario_index, key):
-        """Return one value for one scenario using canonical keys (e.g. 'room_area')."""
-        return get_scenario_input(self.scenario_data, scenario_index, key)
-
-    def scenario_column(self, key):
-        """Return one canonical input key across all non-empty scenarios."""
-        return get_all_scenario_inputs(self.scenario_data, key)
-
 # --- Custom tab bar that renames on double-click ---
 class RenamableTabBar(QTabBar):
     def mouseDoubleClickEvent(self, event):
@@ -416,6 +406,11 @@ class LIBPage(QWidget):
         export_to_pdf = QPushButton("Export PDF Report")
         export_to_pdf.setToolTip("Click here to export a PDF report of the current scenarios and results.")
         export_to_pdf.clicked.connect(lambda: pdf_results(tox_scenario_results=self.base_window.tox_scenario_results, flam_scenario_results=self.base_window.flam_scenario_results, title="Battery Off-gas Assessment Results"))
+
+        # results table button
+        results_table = QPushButton("Results Table")
+        results_table.setToolTip("Open the results table builder for the current calculation results.")
+        results_table.clicked.connect(lambda: open_results_table_window(self.base_window, self.base_window))
         
         # --- add your widgets, with vertical separators between logical groups ---
         # Group 1: calculation method selector
@@ -432,6 +427,8 @@ class LIBPage(QWidget):
         # Group 4: utility / destructive actions
         toolbarlayout.addWidget(clear_all)
         toolbarlayout.addWidget(export_to_pdf)
+        toolbarlayout.addWidget(_make_toolbar_separator())
+        toolbarlayout.addWidget(results_table)
         # add dock widget to left side
         main_layout.addWidget(toolbar)
         
@@ -546,22 +543,217 @@ class LIBPage(QWidget):
 
 
 class SprinklerPage(QWidget):
-    """Placeholder window for the Sprinkler Activation Time calculator."""
+    """UI page for sprinkler activation time calculations."""
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
+        self.last_activation_time_s = None
 
-        label = QLabel("Sprinkler Activation Time Calculator\n\nThis feature is not yet implemented.")
-        font = label.font()
-        font.setPointSize(18)
-        font.setBold(True)
-        label.setFont(font)
-        label.setAlignment(Qt.AlignCenter)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
 
-        layout = QVBoxLayout()
-        layout.addWidget(label)
-        layout.addWidget(label)
-        self.setLayout(layout)
+        toolbar = QToolBar("Sprinkler Activation Time Calculator")
+        toolbar.setMovable(False)
+        toolbarcontents = QWidget()
+        toolbarlayout = QHBoxLayout()
+        toolbarlayout.setContentsMargins(8, 4, 8, 4)
+        toolbarlayout.setSpacing(8)
+        toolbarcontents.setLayout(toolbarlayout)
+        toolbar.addWidget(toolbarcontents)
+
+        run_button = QPushButton("Run")
+        run_button.setToolTip("Run sprinkler activation time calculation with the current inputs.")
+        run_button.clicked.connect(self.run_sprinkler_calc)
+
+        clear_button = QPushButton("Clear")
+        clear_button.setToolTip("Clear all sprinkler input fields.")
+        clear_button.clicked.connect(self.clear_inputs)
+
+        self.copy_activation_button = QPushButton("Copy Activation Duration")
+        self.copy_activation_button.setToolTip("Copy the computed sprinkler activation duration to the clipboard.")
+        self.copy_activation_button.setEnabled(False)
+        self.copy_activation_button.clicked.connect(self.copy_activation_duration)
+
+        toolbarlayout.addWidget(run_button)
+        toolbarlayout.addWidget(clear_button)
+        toolbarlayout.addWidget(self.copy_activation_button)
+        toolbarlayout.addWidget(_make_toolbar_separator())
+
+        page_layout.addWidget(toolbar)
+
+        center_layout = QHBoxLayout()
+        center_layout.setContentsMargins(24, 20, 24, 24)
+        center_layout.addStretch()
+
+        panel = QWidget()
+        panel.setMaximumWidth(760)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setSpacing(14)
+
+        title = QLabel("Sprinkler Activation Time Calculator")
+        title_font = title.font()
+        title_font.setPointSize(20)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setAlignment(Qt.AlignCenter)
+
+        subtitle = QLabel(
+            "Enter the sprinkler and fire parameters below, then click Run to compute activation time."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setAlignment(Qt.AlignCenter)
+
+        input_group = QGroupBox("Inputs")
+        form_layout = QFormLayout()
+        form_layout.setHorizontalSpacing(16)
+        form_layout.setVerticalSpacing(10)
+
+        self.sprinkler_id = QLineEdit()
+        self.sprinkler_id.setPlaceholderText("e.g. SPK-01")
+        self.sprinkler_id.setToolTip("Optional sprinkler identifier.")
+
+        self.ceiling_height = QLineEdit()
+        self.ceiling_height.setPlaceholderText("e.g. 3.0")
+        self.ceiling_height.setToolTip("Ceiling height in meters.")
+
+        self.radial_distance = QLineEdit()
+        self.radial_distance.setPlaceholderText("e.g. 2.0")
+        self.radial_distance.setToolTip("Radial distance from fire plume centerline to sprinkler in meters.")
+
+        self.sprinkler_rti = QLineEdit()
+        self.sprinkler_rti.setPlaceholderText("e.g. 80")
+        self.sprinkler_rti.setToolTip("Sprinkler response time index (m*s)^0.5.")
+
+        self.activation_temperature = QLineEdit()
+        self.activation_temperature.setPlaceholderText("e.g. 68")
+        self.activation_temperature.setToolTip("Sprinkler activation temperature in degC.\n Typical inputs are 'red': 68, 'yellow': 79, 'green': 93")
+
+        self.ambient_temperature = QLineEdit()
+        self.ambient_temperature.setPlaceholderText("e.g. 20")
+        self.ambient_temperature.setToolTip("Ambient temperature in degC.")
+
+        self.fire_growth_rate = QComboBox()
+        self.fire_growth_rate.addItems(list(FIRE_PROPERTIES["fire growth rate"].keys()))
+        self.fire_growth_rate.setToolTip("Select the fire growth rate category.")
+
+        form_layout.addRow("Sprinkler ID:", self.sprinkler_id)
+        form_layout.addRow("Ceiling Height (m):", self.ceiling_height)
+        form_layout.addRow("Radial Distance (m):", self.radial_distance)
+        form_layout.addRow("Response Time Index (m*s)^0.5:", self.sprinkler_rti)
+        form_layout.addRow("Activation Temperature (degC):", self.activation_temperature)
+        form_layout.addRow("Ambient Temperature (degC):", self.ambient_temperature)
+        form_layout.addRow("Fire Growth Rate:", self.fire_growth_rate)
+        input_group.setLayout(form_layout)
+
+        self.results_label = QLabel("Results will appear here after running the calculation.")
+        self.results_label.setWordWrap(True)
+        self.results_label.setAlignment(Qt.AlignCenter)
+
+        panel_layout.addWidget(title)
+        panel_layout.addWidget(subtitle)
+        panel_layout.addWidget(input_group)
+        panel_layout.addWidget(self.results_label)
+
+        center_layout.addWidget(panel)
+        center_layout.addStretch()
+
+        page_layout.addLayout(center_layout)
+
+    def _get_sprinkler_inputs(self):
+        """Collect and validate user input for sprinkler calculations."""
+        numeric_fields = [
+            ("Ceiling Height", self.ceiling_height, True),
+            ("Radial Distance", self.radial_distance, True),
+            ("Response Time Index", self.sprinkler_rti, True),
+            ("Activation Temperature", self.activation_temperature, False),
+            ("Ambient Temperature", self.ambient_temperature, False),
+        ]
+
+        values = {}
+        for label, widget, must_be_positive in numeric_fields:
+            text = widget.text().strip()
+            if not text:
+                raise ValueError(f"{label} is required.")
+
+            try:
+                value = float(text)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be a valid number.") from exc
+
+            if must_be_positive and value <= 0:
+                raise ValueError(f"{label} must be greater than 0.")
+
+            values[label] = value
+
+        return {
+            "sprinkler_id": self.sprinkler_id.text().strip() or "Sprinkler-1",
+            "ceiling_height": values["Ceiling Height"],
+            "radial_distance": values["Radial Distance"],
+            "sprinkler_response_time_index": values["Response Time Index"],
+            "sprinkler_activation_temperature": values["Activation Temperature"],
+            "ambient_temperature": values["Ambient Temperature"],
+            "fire_growth_rate": self.fire_growth_rate.currentText(),
+        }
+
+    def run_sprinkler_calc(self):
+        """Run sprinkler activation time calculation from current UI inputs."""
+        try:
+            sprinkler_data = self._get_sprinkler_inputs()
+            result = activation_time_Calc(sprinkler_data)
+        except ValueError as err:
+            QMessageBox.warning(self, "Input Error", str(err))
+            return
+        except Exception as err:
+            QMessageBox.critical(self, "Calculation Error", f"Failed to run calculation:\n{err}")
+            return
+
+        activation_time = result.get("activation_time_s")
+        if activation_time is None:
+            self.last_activation_time_s = None
+            self.copy_activation_button.setEnabled(False)
+            self.results_label.setText(
+                "No activation occurred within the maximum simulation time (10000 s)."
+            )
+            QMessageBox.information(
+                self,
+                "Sprinkler Result",
+                "No activation occurred within the maximum simulation time (10000 s).",
+            )
+            return
+
+        summary = (
+            f"Sprinkler {sprinkler_data['sprinkler_id']} activation time: {activation_time:.1f} s\n"
+            f"Detector temperature at activation check: {result['detector_temperature_c']:.1f} degC"
+        )
+        self.last_activation_time_s = activation_time
+        self.copy_activation_button.setEnabled(True)
+        self.results_label.setText(summary)
+        QMessageBox.information(self, "Sprinkler Result", summary)
+
+    def copy_activation_duration(self):
+        if self.last_activation_time_s is None:
+            QMessageBox.warning(
+                self,
+                "No Activation Duration",
+                "Run a successful sprinkler calculation first to copy the activation duration.",
+            )
+            return
+
+        activation_duration_text = f"{self.last_activation_time_s:.1f} s"
+        QApplication.clipboard().setText(activation_duration_text)
+
+    def clear_inputs(self):
+        self.sprinkler_id.clear()
+        self.ceiling_height.clear()
+        self.radial_distance.clear()
+        self.sprinkler_rti.clear()
+        self.activation_temperature.clear()
+        self.ambient_temperature.clear()
+        self.fire_growth_rate.setCurrentIndex(0)
+        self.last_activation_time_s = None
+        self.copy_activation_button.setEnabled(False)
+        self.results_label.setText("Results will appear here after running the calculation.")
 
 
 class TutorialPage(QWidget):

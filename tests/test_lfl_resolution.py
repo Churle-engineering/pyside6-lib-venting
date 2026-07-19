@@ -1,6 +1,7 @@
 import unittest
 
-from calculations import resolve_lfl_curve_labels
+from calculations import resolve_lfl_curve_labels, resolve_toxic_gas_densities
+from information import BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES
 
 
 class LFLResolutionTests(unittest.TestCase):
@@ -11,6 +12,25 @@ class LFLResolutionTests(unittest.TestCase):
 
         self.assertEqual(names, ["co", "h2", "total_hydrocarbons"])
         self.assertEqual(rows, [0, 1, 2])
+
+    def test_toxic_density_resolution_uses_all_canonical_density_components(self):
+        for chemistry in BATTERY_CHEMISTRY_DATA.values():
+            composition = chemistry["tox_gas_composition"]
+            labels, percentages, densities = resolve_toxic_gas_densities(composition)
+            expected_labels = [
+                label
+                for label in composition
+                if CHEMICAL_PROPERTIES.get(label, {}).get("density", 0) > 0
+            ]
+
+            self.assertEqual(labels, expected_labels)
+            self.assertEqual(len(percentages), len(labels))
+            self.assertEqual(len(densities), len(labels))
+
+        nmc_labels, _, _ = resolve_toxic_gas_densities(
+            BATTERY_CHEMISTRY_DATA["NMC"]["tox_gas_composition"]
+        )
+        self.assertIn("h2o", nmc_labels)
 
 
 if __name__ == "__main__":

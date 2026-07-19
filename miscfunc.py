@@ -1,26 +1,9 @@
 import numpy as np
 import os
-import sys
 import zipfile
-import csv
-from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox, QInputDialog, QTableWidgetItem
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QInputDialog, QTableWidgetItem
 
 from information import COMBINED_INPUTS
-
-
-
-def _get_base_dir():
-    """Get the base directory for data files (handles both script and exe contexts)."""
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-def is_valid_number(value):
-    try:
-        return float(value) >= 0
-    except (ValueError, TypeError):
-        return False
-    
 
 def _normalize_column_name(name):
     return str(name).strip().lower().replace(" ", "_").replace("-", "_")
@@ -320,206 +303,199 @@ def generate_input_template(state):
         
 
 def import_gas_flowrate_data(state):
-    """Import gas flowrate data from an Excel file with four tabs (co, h2, total_hydrocarbons, co2).
-    Each tab should contain two columns: Column A = time (s), Column B = flowrate (m³/s).
-    Time data can be at any interval and does not need to start at 0.
-    The data is interpolated onto a uniform 1-second grid starting at 0s.
-    Stores the resulting arrays on state for use by flammability_assessment_calc.
+    """Import gas flowrate data from an Excel file for graphical flammability calculations.
+
+    Expected sheets: co, h2, total_hydrocarbons, co2.
+    Sheet columns: column A = time (minutes), column B = flowrate (L/min).
+    Data is interpolated to a 1-second grid and stored as m3/s arrays on state.
     """
     import pandas as pd
-    import numpy as np
 
+    parent = state if hasattr(state, "parent") else None
     file_path, _ = QFileDialog.getOpenFileName(
-        state if hasattr(state, "parent") else None,
+        parent,
         "Select Gas Flowrate Data Excel File",
         "",
         "Excel files (*.xlsx *.xls)"
     )
     if not file_path:
-        return  # User cancelled
+        return
 
-    # Ask user for the off-gassing start time (in minutes) within the data
-    offgas_start_min = QInputDialog.getDouble(
+    # PySide returns a tuple: (value, accepted)
+    offgas_start_result = QInputDialog.getDouble(
+        parent,
         "Off-gassing Start Time",
         "Enter the time (in minutes) at which off-gassing begins in the data:\n"
         "(Data before this time will be discarded)",
-        initialvalue=0.0,
-        minvalue=0.0
+        value=0.0,
+        minValue=0.0,
+        decimals=3,
     )
-    if offgas_start_min is None:
-        return  # User cancelled
+
+    if isinstance(offgas_start_result, tuple):
+        offgas_start_min, accepted = offgas_start_result
+        if not accepted:
+            return
+    else:
+        offgas_start_min = float(offgas_start_result)
 
     expected_tabs = ["co", "h2", "total_hydrocarbons", "co2"]
 
     try:
         xl = pd.ExcelFile(file_path)
-        sheet_names_lower = {name.strip().lower(): name for name in xl.sheet_names}
+        sheet_names_lower = {str(name).strip().lower(): name for name in xl.sheet_names}
 
-        # Validate that all expected tabs exist
         missing_tabs = [tab for tab in expected_tabs if tab not in sheet_names_lower]
         if missing_tabs:
-            QMessageBox.critical(None,
+            QMessageBox.critical(
+                parent,
                 "Missing Tabs",
-                f"The selected Excel file is missing the following required tabs:\n{', '.join(missing_tabs)}\n\n"
-                f"Found tabs: {', '.join(xl.sheet_names)}"
+                f"The selected Excel file is missing required tabs:\n{', '.join(missing_tabs)}\n\n"
+                f"Found tabs: {', '.join(map(str, xl.sheet_names))}"
             )
             return
 
         flowrate_data = {}
-        max_time = 0  # Track the longest duration across all gases
+        max_time_minutes = 0.0
 
         for tab in expected_tabs:
             actual_sheet_name = sheet_names_lower[tab]
             df = xl.parse(actual_sheet_name)
             if df.empty or df.shape[1] < 2:
-                QMessageBox.critical(None,
+                QMessageBox.critical(
+                    parent,
                     "Invalid Tab Format",
                     f"The tab '{actual_sheet_name}' must have at least two columns:\n"
-                    f"Column A = Time (s), Column B = Flowrate (m³/s)"
+                    "Column A = Time (min), Column B = Flowrate (L/min)"
                 )
                 return
 
-            # Read first two columns: time and flowrate
-            time_raw = pd.to_numeric(df.iloc[:, 0], errors='coerce')
-            flow_raw = pd.to_numeric(df.iloc[:, 1], errors='coerce')
+            time_raw = pd.to_numeric(df.iloc[:, 0], errors="coerce")
+            flow_raw = pd.to_numeric(df.iloc[:, 1], errors="coerce")
 
-            # Drop rows where either value is NaN
             valid_mask = time_raw.notna() & flow_raw.notna()
-            time_vals = time_raw[valid_mask].values
-            flow_vals = flow_raw[valid_mask].values
-
-            # Convert flowrate from L/min to m³/s: divide by 60 (L/s) then by 1000 (m³/s)
-            flow_vals = flow_vals / 60.0 / 1000.0
+            time_vals = time_raw[valid_mask].to_numpy(dtype=float)
+            flow_vals = flow_raw[valid_mask].to_numpy(dtype=float)
 
             if len(time_vals) < 2:
-                QMessageBox.critical(None,
+                QMessageBox.critical(
+                    parent,
                     "Insufficient Data",
                     f"The tab '{actual_sheet_name}' has fewer than 2 valid data points after cleaning."
                 )
                 return
 
-            # Sort by time in case data is not ordered
             sort_idx = np.argsort(time_vals)
             time_vals = time_vals[sort_idx]
             flow_vals = flow_vals[sort_idx]
 
-            # Track the maximum end time across all gases (in minutes)
-            if time_vals[-1] > max_time:
-                max_time = time_vals[-1]
+            # Convert L/min -> m3/s
+            flow_vals = flow_vals / 60.0 / 1000.0
 
+            max_time_minutes = max(max_time_minutes, float(time_vals[-1]))
             flowrate_data[tab] = (time_vals, flow_vals)
 
-        # Create uniform 1-unit grid in minutes, then convert to seconds
-        # Interpolate at 1-minute intervals first, then expand to 1-second grid
-        max_time_minutes = max_time
-        # Create a grid at the original minute scale with 1/60 minute steps (= 1 second)
-        max_time_seconds = int(np.ceil(max_time_minutes * 60))
-        uniform_time = np.arange(0, max_time_seconds + 1, 1)  # 0, 1, 2, ... seconds
-        # Corresponding time in minutes for interpolation
+        max_time_seconds = int(np.ceil(max_time_minutes * 60.0))
+        uniform_time = np.arange(0, max_time_seconds + 1, 1, dtype=int)
         uniform_time_minutes = uniform_time / 60.0
 
-        # Interpolate each gas onto the uniform grid (interpolate in minutes, result is per-second)
         interpolated_data = {}
         for tab in expected_tabs:
             time_vals, flow_vals = flowrate_data[tab]
-
-            # Linear interpolation using minute-scale time points
             interpolated = np.interp(uniform_time_minutes, time_vals, flow_vals, left=0.0, right=0.0)
-            interpolated = np.maximum(interpolated, 0.0)  # Clamp any negative values to zero
-            interpolated_data[tab] = interpolated
-            print(f"  {tab}: {len(time_vals)} raw points -> {len(interpolated)} points "
-                  f"(time range {time_vals[0]:.2f}min - {time_vals[-1]:.2f}min = {time_vals[-1]*60:.0f}s)")
+            interpolated_data[tab] = np.maximum(interpolated, 0.0)
 
-        # Trim data to start at the user-specified off-gassing start time
-        offgas_start_seconds = int(round(offgas_start_min * 60))
+        offgas_start_seconds = int(round(float(offgas_start_min) * 60.0))
         if offgas_start_seconds > 0:
             for tab in expected_tabs:
                 if offgas_start_seconds < len(interpolated_data[tab]):
                     interpolated_data[tab] = interpolated_data[tab][offgas_start_seconds:]
                 else:
-                    interpolated_data[tab] = np.array([0.0])
-            uniform_time = np.arange(0, len(interpolated_data[expected_tabs[0]]))
-            print(f"  Off-gassing start offset applied: trimmed first {offgas_start_seconds}s ({offgas_start_min:.2f} min)")
-        else:
-            print("  No off-gassing start offset (begins at time 0)")
+                    interpolated_data[tab] = np.array([0.0], dtype=float)
 
-        # Store on state
+        # Ensure all gases have the same number of samples for matrix construction.
+        common_len = min(len(interpolated_data[tab]) for tab in expected_tabs)
+        for tab in expected_tabs:
+            interpolated_data[tab] = interpolated_data[tab][:common_len]
+
+        uniform_time = np.arange(0, common_len, 1, dtype=int)
         state.gas_flowrate_data = interpolated_data
-        count = len(uniform_time)
 
-        # Show data review popup (Qt app supplies its own via state hook)
         review = getattr(state, "flowrate_review_popup", None) or _show_flowrate_review_popup
         review(interpolated_data, uniform_time, expected_tabs)
 
-        max_time_seconds = len(uniform_time) - 1
-        print(f"Gas flowrate data loaded: {count} time steps (0-{max_time_seconds}s) from {file_path}")
+        print(f"Gas flowrate data loaded: {common_len} time steps (0-{max(0, common_len - 1)}s) from {file_path}")
 
-    except Exception as e:
-        QMessageBox.critical(None, "Import Error", f"Failed to import gas flowrate data:\n{str(e)}")
-        
+    except Exception as exc:
+        QMessageBox.critical(parent, "Import Error", f"Failed to import gas flowrate data:\n{exc}")
+
+
 def _show_flowrate_review_popup(interpolated_data, uniform_time, gas_labels):
     """Display a popup showing the interpolated flowrate data for each gas for user review."""
     import PySide6.QtWidgets as QtWidgets
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont
 
     popup = QtWidgets.QDialog()
     popup.setWindowTitle("Imported Flowrate Data Review")
-    popup.resize(900, 500)
+    popup.resize(920, 560)
 
-    # Header
-    header_label = QtWidgets.QLabel("Interpolated Gas Flowrate Data (1-second intervals)", popup)
-    header_label.setFont(QtWidgets.QFont('Segoe UI', 11, QtWidgets.QFont.Bold))
-    header_label.setAlignment(QtWidgets.Qt.AlignCenter)
-    header_label.setContentsMargins(0, 10, 0, 5)
-    header_label.show()
+    main_layout = QtWidgets.QVBoxLayout(popup)
+    main_layout.setContentsMargins(12, 12, 12, 12)
+    main_layout.setSpacing(8)
 
-    subheader_label = QtWidgets.QLabel(f"Total duration: {len(uniform_time)} seconds  |  Gases: {', '.join(gas_labels)}", popup)
-    subheader_label.setFont(QtWidgets.QFont('Segoe UI', 9))
-    subheader_label.setAlignment(QtWidgets.Qt.AlignCenter)
-    subheader_label.setContentsMargins(0, 0, 0, 10)
-    subheader_label.show()
+    header_label = QtWidgets.QLabel("Interpolated Gas Flowrate Data (1-second intervals)")
+    header_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+    header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    main_layout.addWidget(header_label)
 
-    # Notebook with a tab per gas
-    notebook = QtWidgets.QTabWidget(popup)
-    notebook.setGeometry(10, 50, 880, 400)
+    subheader_label = QtWidgets.QLabel(
+        f"Total duration: {len(uniform_time)} seconds  |  Gases: {', '.join(gas_labels)}"
+    )
+    subheader_label.setFont(QFont("Segoe UI", 9))
+    subheader_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    main_layout.addWidget(subheader_label)
+
+    notebook = QtWidgets.QTabWidget()
+    main_layout.addWidget(notebook, 1)
 
     for gas in gas_labels:
         frame = QtWidgets.QWidget()
+        frame_layout = QtWidgets.QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+
+        tree = QtWidgets.QTreeWidget(frame)
+        tree.setColumnCount(2)
+        tree.setHeaderLabels(["Time (s)", "Flowrate (m3/s)"])
+        tree.setAlternatingRowColors(True)
+        tree.setUniformRowHeights(True)
+        tree.setColumnWidth(0, 140)
+        tree.setColumnWidth(1, 260)
+        frame_layout.addWidget(tree, 1)
+
+        data = np.asarray(interpolated_data.get(gas, np.array([], dtype=float)), dtype=float)
+        limit = min(len(data), len(uniform_time))
+        for idx in range(limit):
+            item = QtWidgets.QTreeWidgetItem([str(int(uniform_time[idx])), f"{data[idx]:.8e}"])
+            tree.addTopLevelItem(item)
+
+        non_zero = data[data > 0]
+        summary = (
+            f"Points: {len(data)}  |  "
+            f"Max: {(data.max() if len(data) else 0.0):.6e} m3/s  |  "
+            f"Non-zero: {len(non_zero)}  |  "
+            f"Total volume proxy (sum of per-second flow): {data.sum():.6e} m3"
+        )
+        summary_label = QtWidgets.QLabel(summary)
+        summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        summary_label.setFont(QFont("Segoe UI", 8))
+        frame_layout.addWidget(summary_label)
+
         notebook.addTab(frame, gas.upper().replace("_", " "))
 
-        # Treeview for data display
-        tree_frame = QtWidgets.QWidget(frame)
-        tree_layout = QtWidgets.QVBoxLayout(tree_frame)
-        tree_frame.setLayout(tree_layout)
+    close_button = QtWidgets.QPushButton("Close")
+    close_button.setFixedHeight(32)
+    close_button.clicked.connect(popup.accept)
+    main_layout.addWidget(close_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        columns = ("time", "flowrate")
-        tree = QtWidgets.QTreeWidget(tree_frame)
-        tree.setColumnCount(2)
-        tree.setHeaderLabels(["Time (s)", "Flowrate (m³/s)"])
-        tree.setColumnWidth(0, 120)
-        tree.setColumnWidth(1, 200)
-
-        tree_layout.addWidget(tree)
-
-        # Populate with data
-        data = interpolated_data[gas]
-        for i, t in enumerate(uniform_time):
-            tree.insert("", "end", values=(int(t), f"{data[i]:.8e}"))
-
-        # Summary label at bottom of each tab
-        non_zero = data[data > 0]
-        summary = (f"Points: {len(data)}  |  "
-                   f"Max: {data.max():.6e} m³/s  |  "
-                   f"Non-zero: {len(non_zero)}  |  "
-                   f"Total volume: {data.sum():.6e} m³")
-        summary_label = QtWidgets.QLabel(summary, frame)
-        summary_label.setFont(QtWidgets.QFont('Segoe UI', 8))
-        summary_label.setAlignment(QtWidgets.Qt.AlignCenter)
-        summary_label.setContentsMargins(0, 5, 0, 5)
-        summary_label.show()
-    # Close button
-    close_button = QtWidgets.QPushButton("Close", popup)
-    close_button.clicked.connect(popup.destroy)
-    close_button.setStyleSheet("background-color: #3498db; color: white; font: 9pt 'Segoe UI'; font-weight: bold;")
-    close_button.setFixedHeight(30)
-    close_button.move(400, 460)
     popup.exec()
