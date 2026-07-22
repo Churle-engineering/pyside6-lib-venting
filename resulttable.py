@@ -33,6 +33,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+try:
+    from information import CHEMICAL_PROPERTIES
+except Exception:
+    CHEMICAL_PROPERTIES = {}
+
 
 def _metric_peak(df, col):
     return df[col].max()
@@ -88,6 +93,9 @@ def _discover_combined_columns(state):
             continue
         df_keys = DATA_SOURCES[source]["df_keys"]
         for col in _discover_columns(results_dict, df_keys):
+            if source == "Toxicity" and col.endswith(" (v/v%)"):
+                gas = col[:-7]
+                specs.append({"label": f"{gas} (ppm) [{tag}]", "source": source, "col": col, "special": "tox_ppm", "gas": gas})
             specs.append({"label": f"{col} [{tag}]", "source": source, "col": col})
 
     # Derived "% of LFL" column (peak Total Gas v/v% relative to the battery LFL).
@@ -144,9 +152,36 @@ def _compute_pct_of_lfl(res, decimals):
         return f"{pct:.{decimals}f}% of LFL"
     except (ValueError, TypeError):
         return ""
+
+
+def _compute_pct_of_erpg3(res, gas_name, decimals):
+    """Peak toxic gas % of ERPG-3 based on matching mg/L concentration."""
+    if res is None or not gas_name:
+        return ""
+
+    df_mgl = res.get("tox_mgl_df")
+    mgl_col = f"{gas_name} (mg/L)"
+    if df_mgl is None or mgl_col not in df_mgl.columns:
+        return ""
+
+    try:
+        input_data = res.get("input", {}) or {}
+        gas_data = input_data.get("gas_data", {}) or {}
+        erpg3 = gas_data.get(gas_name, {}).get("erpg_3")
+        if erpg3 is None:
+            erpg3 = CHEMICAL_PROPERTIES.get(gas_name.lower(), {}).get("erpg_3")
+        erpg3 = float(erpg3)
+        if erpg3 <= 0:
+            return ""
+
+        peak_mgl = float(df_mgl[mgl_col].max())
+        pct = (peak_mgl / erpg3) * 100
+        return f"{pct:.{decimals}f}% of ERPG-3"
+    except (ValueError, TypeError):
+        return ""
     
 
-def build_results_table(state, scenarios, column_specs, metric_name, decimals):
+def build_results_table(state, scenarios, column_specs, metric_name, decimals, include_erpg3_text=False):
     """
     Assemble a single combined table as a list of rows (first row is the header).
 
@@ -172,6 +207,20 @@ def build_results_table(state, scenarios, column_specs, metric_name, decimals):
             value = ""
             if spec.get("special") == "pct_of_lfl":
                 value = _compute_pct_of_lfl(res, decimals)
+            elif spec.get("special") == "tox_ppm":
+                if res is not None:
+                    df = _find_df_for_column(res, df_keys, col)
+                    if df is not None:
+                        try:
+                            raw = metric_fn(df, col)
+                            value = f"{float(raw):.{decimals}f}"
+                        except (ValueError, TypeError):
+                            value = str(raw)
+
+                    if include_erpg3_text and metric_name == "Peak Value" and value:
+                        pct_text = _compute_pct_of_erpg3(res, spec.get("gas", ""), decimals)
+                        if pct_text:
+                            value = f"{value} ({pct_text})"
             elif res is not None:
                 df = _find_df_for_column(res, df_keys, col)
                 if df is not None:
@@ -262,6 +311,15 @@ def open_results_table_window(parent, state):
     include_header_var.setChecked(True)
     include_header_var.setStyleSheet("font-family: Segoe UI; font-size: 9pt; color: #2c3e50;")
     controls_layout.addWidget(include_header_var)
+
+    include_erpg3_btn = QPushButton("ERPG-3 text: OFF")
+    include_erpg3_btn.setCheckable(True)
+    include_erpg3_btn.setStyleSheet(
+        "QPushButton { border: 1px solid #d9e2ec; border-radius: 6px; padding: 4px 10px; "
+        "font-family: Segoe UI; font-size: 9pt; color: #2c3e50; background-color: white; }"
+        "QPushButton:checked { background-color: #e8f4ff; border-color: #5dade2; color: #1b4f72; }"
+    )
+    controls_layout.addWidget(include_erpg3_btn)
     controls_layout.addStretch(1)
     layout.addWidget(controls)
 
@@ -323,7 +381,14 @@ def open_results_table_window(parent, state):
         column_specs = [entry["spec"] for entry in column_vars.values() if entry["var"].isChecked()]
         if not scenarios or not column_specs:
             return None
-        return build_results_table(state, scenarios, column_specs, metric_combo.currentText(), decimals_spin.value())
+        return build_results_table(
+            state,
+            scenarios,
+            column_specs,
+            metric_combo.currentText(),
+            decimals_spin.value(),
+            include_erpg3_text=include_erpg3_btn.isChecked(),
+        )
 
     def refresh_preview(*_):
         rows = current_rows()
@@ -397,6 +462,8 @@ def open_results_table_window(parent, state):
     metric_combo.currentIndexChanged.connect(refresh_preview)
     decimals_spin.valueChanged.connect(refresh_preview)
     include_header_var.stateChanged.connect(refresh_preview)
+    include_erpg3_btn.toggled.connect(lambda checked: include_erpg3_btn.setText(f"ERPG-3 text: {'ON' if checked else 'OFF'}"))
+    include_erpg3_btn.toggled.connect(refresh_preview)
 
     buttons = QHBoxLayout()
     buttons.setContentsMargins(0, 0, 0, 0)

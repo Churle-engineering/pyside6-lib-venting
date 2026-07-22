@@ -1,6 +1,7 @@
 import re
+from dataclasses import dataclass
+
 import numpy as np
-import math
 import pandas as pd
 from scipy.signal import lfilter
 from PySide6.QtWidgets import QMessageBox
@@ -19,6 +20,7 @@ from information import (
     H2_TEMPERATURE_LFL_PARAMETER_B,
     THC_TEMPERATURE_LFL_PARAMETER_A,
     THC_TEMPERATURE_LFL_PARAMETER_B,
+    MXC_VALUES
 )
 
 
@@ -206,6 +208,74 @@ def _iter_scenarios(state, scenario_data=None):
     return []
 
 
+@dataclass(slots=True)
+class ScenarioInputs:
+    """Typed, attribute-accessed view of one parsed scenario row.
+
+    Replaces the previous dict-based ``inputs`` structure so downstream
+    calculation code uses attribute access (``inputs.room_area``) instead of
+    string-keyed lookups (``inputs["room_area"]``). This catches key typos
+    at edit time (via IDE/type checking) instead of at runtime, and
+    ``slots=True`` avoids the per-instance ``__dict__`` a plain dict/object
+    would need, which keeps memory use low even across many scenarios.
+    """
+
+    total_duration: int = 0
+    time_step: int = 1
+    ventilation_rate: float = 0.0
+    room_height: float = 0.0
+    room_area: float = 0.0
+    equip_space: float = 0.0
+    cell_volume: float = 0.0
+    cell_duration: float = 0.0
+    module_volume: float = 0.0
+    module_duration: float = 0.0
+    cells: float = 0.0
+    modules: float = 0.0
+    units: float = 0.0
+    lfl_percent: float = 0.0
+    propagation_delay: float = 0.0
+    module_capacity: float = 0.0
+    vent_switch_conc: float = 0.0
+    emergency_vent_rate: float = 0.0
+    co2_percent: float = 0.0
+    venting_temperature: float = 0.0
+    lib_type: str = "NMC"
+
+    def to_input_array(self):
+        """Return the numeric fields as one contiguous float64 numpy array.
+
+        Handy when a batch of scenarios needs identical arithmetic applied
+        at once (e.g. stacking several scenarios' arrays with ``np.vstack``
+        for a vectorised calculation) instead of scalar attribute access.
+        """
+        return np.array(
+            [
+                self.total_duration,
+                self.time_step,
+                self.ventilation_rate,
+                self.room_height,
+                self.room_area,
+                self.equip_space,
+                self.cell_volume,
+                self.cell_duration,
+                self.module_volume,
+                self.module_duration,
+                self.cells,
+                self.modules,
+                self.units,
+                self.lfl_percent,
+                self.propagation_delay,
+                self.module_capacity,
+                self.vent_switch_conc,
+                self.emergency_vent_rate,
+                self.co2_percent,
+                self.venting_temperature,
+            ],
+            dtype=np.float64,
+        )
+
+
 def _parse_scenario_inputs(data, propagation_delay_default=0.0):
     """Convert one spreadsheet row into the shared calculation input shape."""
     def number(column, *aliases, default=0.0):
@@ -214,31 +284,34 @@ def _parse_scenario_inputs(data, propagation_delay_default=0.0):
                 return _coerce_scalar(data[label], default)
         return default
 
-    return {
-        "total_duration": int(number("Calculation Duration (s)")),
-        "time_step": int(number("Time Step (s)", default=1.0)),
-        "ventilation_rate": number("Ventilation Rate (L/s/m2)"),
-        "room_height": number("Room Height (m)"),
-        "room_area": number("Room Area (m2)"),
-        "equip_space": number("Equipment Space (%)"),
-        "cell_volume": number("cell_volume_(l)"),
-        "cell_duration": number("cell_duration_(s)"),
-        "module_volume": number("module_volume_(l)"),
-        "module_duration": number("module_duration_(s)"),
-        "cells": number("Cells per module", "Cells per"),
-        "modules": number("Modules per unit", "Modules per"),
-        "units": number("Units"),
-        "lfl_percent": number("LFL (%)", "lfl_(%)"),
-        "propagation_delay": number(
-            "Module Propagation Delay (s)", default=propagation_delay_default
+    return ScenarioInputs(
+        total_duration=int(number("Calculation Duration (s)")),
+        time_step=int(number("Time Step (s)", default=1.0)),
+        ventilation_rate=number("Ventilation Rate (L/s/m2)"),
+        room_height=number("Room Height (m)"),
+        room_area=number("Room Area (m2)"),
+        equip_space=number("Equipment Space (%)"),
+        cell_volume=number("cell_volume_(l)"),
+        cell_duration=number("cell_duration_(s)"),
+        module_volume=number("module_volume_(l)"),
+        module_duration=number("module_duration_(s)"),
+        cells=number("Cells per module", "Cells per"),
+        modules=number("Modules per unit", "Modules per"),
+        units=number("Units"),
+        lfl_percent=number("LFL (%)", "lfl_(%)"),
+        propagation_delay=number("Module Propagation Delay (s)", default=propagation_delay_default),
+        module_capacity=number("module_capacity_(kwh)"),
+        vent_switch_conc=number("Vent Switch Conc (%)"),
+        emergency_vent_rate=number("Emergency Vent Rate (L/s/m2)"),
+        co2_percent=number("co2_(%)", "CO2 (%)") / 100.0,
+        venting_temperature=number(
+            "venting_temperature_(°c)",
+            "venting_temperature_(°C)",
+            "Venting Temperature (°C)",
+            "Venting Temperature (C)",
         ),
-        "module_capacity": number("module_capacity_(kwh)"),
-        "vent_switch_conc": number("Vent Switch Conc (%)"),
-        "emergency_vent_rate": number("Emergency Vent Rate (L/s/m2)"),
-        "co2_percent": number("co2_(%)", "CO2 (%)") / 100.0,
-        "venting_temperature": number("venting_temperature_(°c)"),
-        "lib_type": str(data.get("LIB Type", "NMC") or "NMC"),
-    }
+        lib_type=str(data.get("LIB Type", "NMC") or "NMC"),
+    )
 
 
 def calc_active_modules_array(time_array, total_mods, propagation_delay, mod_duration, modules_per_delay=MODULES_PER_DELAY):
@@ -248,16 +321,18 @@ def calc_active_modules_array(time_array, total_mods, propagation_delay, mod_dur
     t_pos = time_array[mask]
 
     if propagation_delay > 0:
-        intervals_passed = (t_pos // propagation_delay).astype(np.int64)
+        # First delayed group starts one full delay after the initial module start.
+        intervals_passed = ((t_pos - 1) // propagation_delay).astype(np.int64)
+        intervals_passed = np.maximum(intervals_passed, 0)
         started = np.minimum(total_mods, 1 + intervals_passed * modules_per_delay)
     else:
         started = np.full(len(t_pos), total_mods, dtype=np.float64)
 
     if propagation_delay == 0:
-        finished = np.where(t_pos >= mod_duration, total_mods, 0)
+        finished = np.where(t_pos >= (1 + mod_duration), total_mods, 0)
     else:
-        past_duration = t_pos >= mod_duration
-        finished_intervals = ((t_pos - mod_duration) // propagation_delay).astype(np.int64) * modules_per_delay
+        past_duration = t_pos >= (1 + mod_duration)
+        finished_intervals = ((t_pos - (1 + mod_duration)) // propagation_delay).astype(np.int64) * modules_per_delay
         finished = np.where(past_duration, np.minimum(total_mods, 1 + finished_intervals), 0)
 
     active[mask] = np.maximum(0, started - finished)
@@ -327,49 +402,257 @@ def resolve_toxic_gas_densities(tox_gas_composition):
     )
 
 
-def resolve_target_gas_index(valid_gas_labels, state):
-    target_gas_map = {"CO": "co", "H2": "h2", "Total Hydrocarbons": "total_hydrocarbons"}
-    selected_target = _resolve_state_value(state, "selected_target_flam_gas", "CO")
-    if selected_target is None:
-        selected_target = "CO"
-
-    target_gas_key = target_gas_map.get(str(selected_target), "co")
+def resolve_toxic_trigger_gas(valid_gas_labels):
+    """Return (label, index, erpg_3_threshold) for CO, the fixed toxicity emergency-vent trigger gas."""
     for idx, label in enumerate(valid_gas_labels):
-        if normalize_gas_key(label) == target_gas_key:
-            return selected_target, idx
-
-    return selected_target, None
-
-
-def setup_emergency_ventilation(vent_switch_conc, emergency_vent_rate, room_area):
-    adj_emergency_vent_rate = (emergency_vent_rate / 1000.0) * room_area if emergency_vent_rate > 0 else 0
-    emergency_vent_enabled = vent_switch_conc > 0 and emergency_vent_rate > 0
-    return adj_emergency_vent_rate, emergency_vent_enabled
+        if normalize_gas_key(label) == "co":
+            erpg_3 = CHEMICAL_PROPERTIES.get("co", {}).get("erpg_3")
+            if erpg_3 is not None and erpg_3 > 0:
+                return label, idx, erpg_3
+            return label, idx, None
+    return None, None, None
 
 
-def run_max_modules_binary_search(total_duration, time_step, propagation_delay, mod_duration, mod_flowrate, gas_percent, room_vol, adj_ventilation_rate, threshold_value, modules_per_delay=MODULES_PER_DELAY):
-    vent_coeff = adj_ventilation_rate / room_vol if room_vol > 0 else 0
-    alpha = 1.0 - vent_coeff * time_step
-    time_array = np.arange(0, total_duration + 1, time_step)
+def init_emergency_ventilation(ventilation_rate, emergency_vent_rate, room_area, room_vol, vent_switch_conc, trigger_threshold=None):
+    """Create shared emergency-ventilation controller state for toxicity and flammability calcs.
+
+    `vent_switch_conc` is the user-entered value that (alongside `emergency_vent_rate`) must be
+    provided to enable emergency ventilation. `trigger_threshold` is the concentration the
+    monitored gas must exceed to activate; defaults to `vent_switch_conc` (flammable gas case).
+    """
+    if trigger_threshold is None:
+        trigger_threshold = vent_switch_conc
+
+    base_vent_rate = (ventilation_rate / 1000.0) * room_area if ventilation_rate > 0 else 0.0
+    requested_emergency_rate = (emergency_vent_rate / 1000.0) * room_area if emergency_vent_rate > 0 else 0.0
+    emergency_vent_rate_effective = max(base_vent_rate, requested_emergency_rate)
+
+    base_outflow = base_vent_rate / room_vol if room_vol > 0 else 0.0
+    emergency_outflow = emergency_vent_rate_effective / room_vol if room_vol > 0 else 0.0
+    enabled = (
+        vent_switch_conc > 0
+        and requested_emergency_rate > base_vent_rate
+        and room_vol > 0
+        and trigger_threshold is not None
+    )
+
+    print(
+        f"DEBUG: init_emergency_ventilation -> enabled={enabled}, "
+        f"base_outflow={base_outflow:.6f}/s, emergency_outflow={emergency_outflow:.6f}/s, "
+        f"trigger_threshold={trigger_threshold}, vent_switch_conc={vent_switch_conc}, "
+        f"emergency_vent_rate={emergency_vent_rate}"
+    )
+
+    return {
+        "trigger_threshold": trigger_threshold,
+        "enabled": enabled,
+        "activated": False,
+        "base_outflow": base_outflow,
+        "emergency_outflow": emergency_outflow,
+        "current_outflow": base_outflow,
+    }
+
+
+def resolve_trigger_concentration(current_conc, target_gas_index):
+    if target_gas_index is None:
+        return float(np.sum(current_conc))
+    if target_gas_index < 0 or target_gas_index >= len(current_conc):
+        return float(np.sum(current_conc))
+    return float(current_conc[target_gas_index])
+
+
+def maybe_activate_emergency_ventilation(vent_state, trigger_conc, time_s, target_gas_name):
+    if not vent_state["enabled"] or vent_state["activated"]:
+        return vent_state["current_outflow"]
+
+    if trigger_conc > vent_state["trigger_threshold"]:
+        old_outflow = vent_state["current_outflow"]
+        vent_state["activated"] = True
+        vent_state["current_outflow"] = vent_state["emergency_outflow"]
+        print(f"⚠️ Emergency ventilation ACTIVATED at t={time_s}s ({target_gas_name}: {trigger_conc:.4f}%)")
+        print(f"DEBUG: outflow changed from {old_outflow:.6f}/s to {vent_state['current_outflow']:.6f}/s")
+
+    return vent_state["current_outflow"]
+
+
+def _search_modules_required_for_threshold(peak_fn, threshold_value, max_modules_limit=100000):
+    """Return the minimum failing modules needed to reach the criterion threshold."""
+    if threshold_value <= 0:
+        return 0
 
     low = 1
-    high = 100000
-    max_modules = None
+    high = 1
+    while high <= max_modules_limit and peak_fn(high) < threshold_value:
+        low = high + 1
+        high *= 2
 
+    if low > max_modules_limit:
+        return None
+
+    high = min(high, max_modules_limit)
+    if low > high:
+        return None
+
+    result = None
     while low <= high:
-        mid = (low + high + 1) // 2
-        active_array = calc_active_modules_array(time_array, mid, propagation_delay, mod_duration, modules_per_delay)
-        inflow_signal = active_array * mod_flowrate * gas_percent * time_step
-        gas_array = lfilter([1.0], [1.0, -alpha], inflow_signal)
-        gas_array = np.maximum(gas_array, 0.0)
-
-        if np.any(gas_array >= threshold_value):
+        mid = (low + high) // 2
+        if peak_fn(mid) >= threshold_value:
+            result = mid
             high = mid - 1
         else:
-            max_modules = mid
             low = mid + 1
+    return result
 
-    return max_modules
+
+def modules_required_constant_flow(
+    total_duration,
+    time_step,
+    propagation_delay,
+    mod_duration,
+    per_module_flowrate,
+    room_vol,
+    adj_ventilation_rate,
+    threshold_value,
+    modules_per_delay=MODULES_PER_DELAY,
+    max_modules_limit=100000,
+):
+    """Minimum failed modules needed to reach threshold for constant per-module release."""
+    if threshold_value <= 0:
+        return 0
+
+    if (
+        room_vol <= 0
+        or time_step <= 0
+        or total_duration <= 0
+        or mod_duration <= 0
+        or per_module_flowrate <= 0
+    ):
+        return None
+
+    vent_coeff = adj_ventilation_rate / room_vol if room_vol > 0 else 0.0
+    alpha = 1.0 - vent_coeff * time_step
+    time_array = np.arange(0, total_duration + 1, time_step)
+    peak_cache = {}
+
+    def peak_with_modules(module_count):
+        cached = peak_cache.get(module_count)
+        if cached is not None:
+            return cached
+        active_array = calc_active_modules_array(
+            time_array,
+            module_count,
+            propagation_delay,
+            mod_duration,
+            modules_per_delay,
+        )
+        inflow_signal = active_array * per_module_flowrate * time_step
+        gas_array = lfilter([1.0], [1.0, -alpha], inflow_signal)
+        gas_array = np.maximum(gas_array, 0.0)
+        peak_value = float(np.max(gas_array)) if gas_array.size else 0.0
+        peak_cache[module_count] = peak_value
+        return peak_value
+
+    return _search_modules_required_for_threshold(
+        peak_with_modules,
+        threshold_value,
+        max_modules_limit=max_modules_limit,
+    )
+
+
+def modules_required_flow_profile(
+    total_duration,
+    time_step,
+    propagation_delay,
+    flowrate_profile,
+    room_vol,
+    adj_ventilation_rate,
+    threshold_value,
+    modules_per_delay=MODULES_PER_DELAY,
+    max_modules_limit=100000,
+):
+    """Minimum failed modules needed to reach threshold for a per-module flow profile."""
+    if threshold_value <= 0:
+        return 0
+
+    if room_vol <= 0 or time_step <= 0 or total_duration <= 0:
+        return None
+
+    profile = np.asarray(flowrate_profile, dtype=float)
+    if profile.size == 0 or not np.any(profile > 0):
+        return None
+
+    mod_duration = int(profile.size)
+    time_array = np.arange(0, total_duration + 1, time_step)
+    num_steps = len(time_array)
+    vent_coeff = adj_ventilation_rate / room_vol if room_vol > 0 else 0.0
+    alpha = 1.0 - vent_coeff * time_step
+    peak_cache = {}
+
+    def peak_with_modules(total_mods):
+        cached = peak_cache.get(total_mods)
+        if cached is not None:
+            return cached
+
+        inflow_signal = np.zeros(num_steps, dtype=float)
+        if total_mods > 0:
+            if propagation_delay <= 0:
+                module_groups = [(1, int(total_mods))]
+            else:
+                module_groups = []
+                remaining = int(total_mods)
+                module_groups.append((1, 1))
+                remaining -= 1
+                delay_count = 1
+                while remaining > 0:
+                    start_time = int(1 + delay_count * propagation_delay)
+                    count = min(modules_per_delay, remaining)
+                    module_groups.append((start_time, count))
+                    remaining -= count
+                    delay_count += 1
+
+            for group_start, group_count in module_groups:
+                valid_mask = (time_array >= group_start) & ((time_array - group_start) < mod_duration)
+                if not np.any(valid_mask):
+                    continue
+                local_times = (time_array[valid_mask] - group_start).astype(np.intp)
+                inflow_signal[valid_mask] += group_count * profile[local_times] * time_step
+
+        gas_array = lfilter([1.0], [1.0, -alpha], inflow_signal)
+        gas_array = np.maximum(gas_array, 0.0)
+        peak_value = float(np.max(gas_array)) if gas_array.size else 0.0
+        peak_cache[total_mods] = peak_value
+        return peak_value
+
+    return _search_modules_required_for_threshold(
+        peak_with_modules,
+        threshold_value,
+        max_modules_limit=max_modules_limit,
+    )
+
+
+def max_modules_before_threshold(modules_required, max_modules_limit=100000):
+    """Convert a modules-required value into maximum modules that can fail before criterion is met."""
+    if modules_required is None:
+        return max_modules_limit
+    return max(0, int(modules_required) - 1)
+
+
+
+
+def k_value_calculation(venting_temperature, gas_key):
+    
+    
+    
+    for gas in gas_label:
+        mxc = MXC_VALUES.get(gas_key, None)
+        k = (mxc * ((100 / T_c) - 1)) / (100 - mxc)
+    
+    return k
+
+
+
+
+# --- Calculations ---
 
 
 def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_data, scenario_data=None):
@@ -387,24 +670,24 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
     for scenario_name, data in scenarios:
         try:
             inputs = _parse_scenario_inputs(data, propagation_delay_default=180.0)
-            total_duration = inputs["total_duration"]
-            time_step = inputs["time_step"]
-            ventilation_rate = inputs["ventilation_rate"]
-            room_height = inputs["room_height"]
-            room_area = inputs["room_area"]
-            equip_space = inputs["equip_space"]
-            vol_battery = inputs["cell_volume"]
-            cell_duration = inputs["cell_duration"]
-            module_volume = inputs["module_volume"]
-            module_duration = inputs["module_duration"]
-            cells = inputs["cells"]
-            modules = inputs["modules"]
-            units = inputs["units"]
-            lib_type = inputs["lib_type"]
-            propagation_delay = inputs["propagation_delay"]
-            mod_capacity = inputs["module_capacity"]
-            vent_switch_conc = inputs["vent_switch_conc"]
-            emergency_vent_rate = inputs["emergency_vent_rate"]
+            total_duration = inputs.total_duration
+            time_step = inputs.time_step
+            ventilation_rate = inputs.ventilation_rate
+            room_height = inputs.room_height
+            room_area = inputs.room_area
+            equip_space = inputs.equip_space
+            vol_battery = inputs.cell_volume
+            cell_duration = inputs.cell_duration
+            module_volume = inputs.module_volume
+            module_duration = inputs.module_duration
+            cells = inputs.cells
+            modules = inputs.modules
+            units = inputs.units
+            lib_type = inputs.lib_type
+            propagation_delay = inputs.propagation_delay
+            mod_capacity = inputs.module_capacity
+            vent_switch_conc = inputs.vent_switch_conc
+            emergency_vent_rate = inputs.emergency_vent_rate
 
             user_selected_method = _resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A")
             calc_method, was_overridden = determine_calc_method(mod_capacity, user_selected_method)
@@ -442,8 +725,6 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
             time = np.arange(0, total_duration + 1, time_step)
 
             adj_ventilation_rate = (ventilation_rate / 1000.0) * room_area
-            adj_emergency_vent_rate, emergency_vent_enabled = setup_emergency_ventilation(vent_switch_conc, emergency_vent_rate, room_area)
-            emergency_vent_activated = False
 
             if calc_method == "Module Volume UL9540A":
                 battery_duration = module_duration
@@ -455,13 +736,21 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
             room_vol = room_height * room_area * (1 - (equip_space / 100.0))
             total_mods = modules * units
             mod_duration = battery_duration
-            total_vent_outflow = adj_ventilation_rate / room_vol if room_vol > 0 else 0
 
             percent_tox = chemistry_data.get("percent_tox", 100)
             tox_mod_vol = mod_vol * (percent_tox / 100.0)
             mod_flowrate = tox_mod_vol / mod_duration if mod_duration > 0 else 0
 
-            target_gas_name, target_gas_index = resolve_target_gas_index(valid_gas_labels, state)
+            target_gas_name, target_gas_index, co_erpg_3 = resolve_toxic_trigger_gas(valid_gas_labels)
+            emergency_vent_state = init_emergency_ventilation(
+                ventilation_rate,
+                emergency_vent_rate,
+                room_area,
+                room_vol,
+                vent_switch_conc,
+                trigger_threshold=co_erpg_3,
+            )
+            total_vent_outflow = emergency_vent_state["current_outflow"]
             active_modules_arr = calc_active_modules_array(time, total_mods, propagation_delay, mod_duration)
 
             for step_idx in range(num_steps):
@@ -476,12 +765,13 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
                 concentrations[:, step_idx] = current_conc
                 mgl_concentrations[:, step_idx] = (current_conc / 100.0) * densities * 1000.0
 
-                if emergency_vent_enabled and not emergency_vent_activated:
-                    trigger_conc = current_conc[target_gas_index] if target_gas_index is not None else np.sum(current_conc)
-                    if trigger_conc >= vent_switch_conc:
-                        emergency_vent_activated = True
-                        total_vent_outflow = adj_emergency_vent_rate / room_vol if room_vol > 0 else 0
-                        print(f"Emergency ventilation activated at t={time[step_idx]}s ({target_gas_name}: {trigger_conc:.4f}%)")
+                trigger_conc = resolve_trigger_concentration(current_conc, target_gas_index)
+                total_vent_outflow = maybe_activate_emergency_ventilation(
+                    emergency_vent_state,
+                    trigger_conc,
+                    time[step_idx],
+                    target_gas_name or "CO",
+                )
 
             mgl_data = {"Time (s)": time}
             vv_data = {"Time (s)": time}
@@ -497,19 +787,23 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
             tox_max_mods = {}
             for idx, label in enumerate(valid_gas_labels):
                 gas_percent = gas_percents[idx]
+                if gas_percent <= 0:
+                    tox_max_mods[label] = "NA - No Gas Fraction"
+                    continue
+
                 threshold_value = (gas_percent * room_vol) / 100.0
-                max_modules = run_max_modules_binary_search(
+                modules_required = modules_required_constant_flow(
                     total_duration,
                     time_step,
                     propagation_delay,
                     mod_duration,
-                    mod_flowrate,
-                    gas_percent,
+                    mod_flowrate * gas_percent,
                     room_vol,
                     adj_ventilation_rate,
                     threshold_value,
                 )
-                tox_max_mods[label] = max_modules if max_modules is not None else "NA - Exceeds Calc Limit"
+                max_modules = max_modules_before_threshold(modules_required)
+                tox_max_mods[label] = max_modules if modules_required is not None else "NA - Exceeds Calc Limit"
 
             tox_scenario_results[scenario_name] = {
                 "tox_vv_df": tox_result_vv_df,
@@ -552,32 +846,36 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
         display_flammability_result_popup(flam_scenario_results, None, gas_data, bat_data, parent=parent)
         return
 
+    user_selected_method = _resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A")
+    module_capacity_overrides = []
+
     for scenario_name, data in scenarios:
         try:
             inputs = _parse_scenario_inputs(data)
-            total_duration = inputs["total_duration"]
-            time_step = inputs["time_step"]
-            ventilation_rate = inputs["ventilation_rate"]
-            room_height = inputs["room_height"]
-            room_area = inputs["room_area"]
-            cell_vol_battery = inputs["cell_volume"]
-            cell_duration = inputs["cell_duration"]
-            module_volume = inputs["module_volume"]
-            module_duration = inputs["module_duration"]
-            modules = inputs["modules"]
-            equip_space = inputs["equip_space"]
-            units = inputs["units"]
-            cells = inputs["cells"]
-            lfl_percent = inputs["lfl_percent"]
-            propagation_delay = inputs["propagation_delay"]
-            lib_type = inputs["lib_type"]
-            mod_capacity = inputs["module_capacity"]
-            vent_switch_conc = inputs["vent_switch_conc"]
-            emergency_vent_rate = inputs["emergency_vent_rate"]
-            co2_percent = inputs["co2_percent"]
+            total_duration = inputs.total_duration
+            time_step = inputs.time_step
+            ventilation_rate = inputs.ventilation_rate
+            room_height = inputs.room_height
+            room_area = inputs.room_area
+            cell_vol_battery = inputs.cell_volume
+            cell_duration = inputs.cell_duration
+            module_volume = inputs.module_volume
+            module_duration = inputs.module_duration
+            modules = inputs.modules
+            equip_space = inputs.equip_space
+            units = inputs.units
+            cells = inputs.cells
+            lfl_percent = inputs.lfl_percent
+            propagation_delay = inputs.propagation_delay
+            lib_type = inputs.lib_type
+            mod_capacity = inputs.module_capacity
+            vent_switch_conc = inputs.vent_switch_conc
+            emergency_vent_rate = inputs.emergency_vent_rate
+            co2_percent = inputs.co2_percent
 
-            user_selected_method = _resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A")
             calc_method, _ = determine_calc_method(mod_capacity, user_selected_method)
+            if user_selected_method == "Module Capacity" and mod_capacity > 1:
+                module_capacity_overrides.append(f"{scenario_name} ({mod_capacity:g} kWh)")
             use_le_chatelier = _bool_state_value(state, "use_le_chatelier_lfl", False)
             use_temp_dependent_lfl = _bool_state_value(state, "use_temp_dependent_lfl", False)
             print(f"DEBUG: LFL options enabled -> le_chatelier={use_le_chatelier}, temp_dependent={use_temp_dependent_lfl}")
@@ -587,8 +885,8 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
                 lfl_val = gas_data.get(flam_label, {}).get("lfl", 0)
                 individual_lfls[idx] = lfl_val if lfl_val and lfl_val > 0 else 0
 
-            if use_temp_dependent_lfl:
-                venting_temp = inputs["venting_temperature"]
+            if use_le_chatelier and use_temp_dependent_lfl:
+                venting_temp = inputs.venting_temperature
                 if venting_temp > 0:
                     temp_lfls = [
                         CO_TEMPERATURE_LFL_PARAMETER_A * venting_temp + CO_TEMPERATURE_LFL_PARAMETER_B,
@@ -651,11 +949,15 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
             mod_flowrate = flam_mod_vol / mod_duration if mod_duration > 0 else 0
             total_mods = modules * units
             adj_ventilation_rate = (ventilation_rate / 1000.0) * room_area
-            adj_emergency_vent_rate, emergency_vent_enabled = setup_emergency_ventilation(vent_switch_conc, emergency_vent_rate, room_area)
-            emergency_vent_activated = False
-            total_vent_outflow = adj_ventilation_rate / room_vol if room_vol > 0 else 0
+            emergency_vent_state = init_emergency_ventilation(
+                ventilation_rate,
+                emergency_vent_rate,
+                room_area,
+                room_vol,
+                vent_switch_conc,
+            )
+            total_vent_outflow = emergency_vent_state["current_outflow"]
 
-            target_gas_name, target_gas_index = resolve_target_gas_index(valid_gas_labels, state)
             active_modules_arr = calc_active_modules_array(time, total_mods, propagation_delay, mod_duration)
 
             for step_idx in range(num_steps):
@@ -676,12 +978,13 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
                 co2_prev = co2_gas
                 co2_conc_arr[step_idx] = (co2_gas / room_vol) * 1.0 if room_vol > 0 else 0.0
 
-                if emergency_vent_enabled and not emergency_vent_activated:
-                    trigger_conc = current_conc[target_gas_index] if target_gas_index is not None else np.sum(current_conc)
-                    if trigger_conc >= vent_switch_conc:
-                        emergency_vent_activated = True
-                        total_vent_outflow = adj_emergency_vent_rate / room_vol if room_vol > 0 else 0
-                        print(f"Emergency ventilation activated at t={time[step_idx]}s ({target_gas_name}: {trigger_conc:.4f}%)")
+                trigger_conc = float(np.sum(current_conc))
+                total_vent_outflow = maybe_activate_emergency_ventilation(
+                    emergency_vent_state,
+                    trigger_conc,
+                    time[step_idx],
+                    "Total Flammable Gas",
+                )
 
             flam_result_vv_df = pd.DataFrame({"Time (s)": time})
             flam_result_mgl_df = pd.DataFrame({"Time (s)": time})
@@ -697,53 +1000,50 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
 
             adjusted_le_chatelier_lfl = None
             lfl_curve_label = None
-            if use_le_chatelier or use_temp_dependent_lfl:
-                if use_le_chatelier:
-                    names, rows = resolve_lfl_curve_labels(valid_gas_labels)
-                    if names:
-                        conc_flam = vv_concentrations[rows, :]
-                        total_flam_conc = conc_flam.sum(axis=0)
-                        lfl_lookup = {
-                            "co": individual_lfls[0],
-                            "h2": individual_lfls[1],
-                            "total_hydrocarbons": individual_lfls[2],
-                        }
-                        used_lfls = np.array([lfl_lookup[name] for name in names], dtype=float)
-                        adjusted_le_chatelier_lfl = np.full(num_steps, np.nan)
-                        active_mask = total_flam_conc > 0
-                        if np.any(active_mask):
-                            fracs = conc_flam[:, active_mask] / total_flam_conc[active_mask]
-                            inv_lfls = np.where(used_lfls > 0, 1.0 / used_lfls, 0.0)
-                            denominator = inv_lfls @ fracs
-                            valid_denom = denominator > 0
-                            active_indices = np.where(active_mask)[0]
-                            valid_indices = active_indices[valid_denom]
-                            lfl_mix = 1.0 / denominator[valid_denom]
-                            adjusted_le_chatelier_lfl[valid_indices] = lfl_mix
-                        lfl_curve_label = "Temperature-adjusted LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
-                        print(f"DEBUG: LFL curve generated; finite points={np.isfinite(adjusted_le_chatelier_lfl).sum()} label={lfl_curve_label}")
-                elif use_temp_dependent_lfl:
-                    adjusted_le_chatelier_lfl = np.full(num_steps, float(lfl_percent), dtype=float)
-                    lfl_curve_label = "Temperature-adjusted LFL"
-
+            if use_le_chatelier:
+                names, rows = resolve_lfl_curve_labels(valid_gas_labels)
+                if names:
+                    conc_flam = vv_concentrations[rows, :]
+                    total_flam_conc = conc_flam.sum(axis=0)
+                    lfl_lookup = {
+                        "co": individual_lfls[0],
+                        "h2": individual_lfls[1],
+                        "total_hydrocarbons": individual_lfls[2],
+                    }
+                    used_lfls = np.array([lfl_lookup[name] for name in names], dtype=float)
+                    adjusted_le_chatelier_lfl = np.full(num_steps, np.nan)
+                    active_mask = total_flam_conc > 0
+                    if np.any(active_mask):
+                        fracs = conc_flam[:, active_mask] / total_flam_conc[active_mask]
+                        inv_lfls = np.where(used_lfls > 0, 1.0 / used_lfls, 0.0)
+                        denominator = inv_lfls @ fracs
+                        valid_denom = denominator > 0
+                        active_indices = np.where(active_mask)[0]
+                        valid_indices = active_indices[valid_denom]
+                        lfl_mix = 1.0 / denominator[valid_denom]
+                        adjusted_le_chatelier_lfl[valid_indices] = lfl_mix
+                    lfl_curve_label = "Temperature-adjusted Le Chatelier LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
+                    print(f"DEBUG: LFL curve generated; finite points={np.isfinite(adjusted_le_chatelier_lfl).sum()} label={lfl_curve_label}")
                 if adjusted_le_chatelier_lfl is not None:
                     flam_result_vv_df["Le Chatelier LFL (v/v%)"] = adjusted_le_chatelier_lfl
+            elif use_temp_dependent_lfl:
+                print("DEBUG: Temperature-dependent LFL is enabled without Le Chatelier; standard user LFL threshold remains unchanged.")
 
             combined_gas_percent = sum(float(data.get(label, 0)) / 100.0 for label in ["co_(%)", "h2_(%)", "total_hydrocarbons_(%)"])
             lfl_value = (lfl_percent * room_vol) / 100.0 if room_vol > 0 else 0
-            max_modules = run_max_modules_binary_search(
+            modules_required = modules_required_constant_flow(
                 total_duration,
                 time_step,
                 propagation_delay,
                 mod_duration,
-                mod_flowrate,
-                combined_gas_percent,
+                mod_flowrate * combined_gas_percent,
                 room_vol,
                 adj_ventilation_rate,
                 lfl_value,
             )
+            max_modules = max_modules_before_threshold(modules_required)
 
-            flam_max_mods = {"total_gas": max_modules if max_modules is not None else "NA - Exceeds Calc Limit"}
+            flam_max_mods = {"total_gas": max_modules if modules_required is not None else "NA - Exceeds Calc Limit"}
             flam_scenario_results[scenario_name] = {
                 "flam_vv_df": flam_result_vv_df,
                 "flam_mgl_df": flam_result_mgl_df,
@@ -752,8 +1052,8 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
                 "input": data,
                 "use_le_chatelier": use_le_chatelier,
                 "use_temp_dependent_lfl": use_temp_dependent_lfl,
-                "le_chatelier_lfl_array": adjusted_le_chatelier_lfl if (use_le_chatelier or use_temp_dependent_lfl) else None,
-                "lfl_curve_array": adjusted_le_chatelier_lfl if (use_le_chatelier or use_temp_dependent_lfl) else None,
+                "le_chatelier_lfl_array": adjusted_le_chatelier_lfl if use_le_chatelier else None,
+                "lfl_curve_array": adjusted_le_chatelier_lfl if use_le_chatelier else None,
                 "lfl_curve_label": lfl_curve_label,
             }
         except ZeroDivisionError:
@@ -762,6 +1062,16 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
         except Exception as exc:
             QMessageBox.critical(parent, "Calculation Error", f"{scenario_name} failed with an unexpected error:\n{exc}")
             return
+
+    if user_selected_method == "Module Capacity" and module_capacity_overrides:
+        override_list = "\n".join(f"• {item}" for item in module_capacity_overrides)
+        QMessageBox.warning(
+            parent,
+            "Module Capacity Limited",
+            "Module Capacity is limited to modules at or below 1 kWh.\n"
+            "The following scenario(s) exceeded that limit and were calculated using Cell Volume UL9540A instead:\n\n"
+            f"{override_list}",
+        )
 
     display_flammability_result_popup(flam_scenario_results, None, gas_data, bat_data, parent=parent)
 
@@ -794,18 +1104,18 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
     for scenario_name, data in scenarios:
         try:
             inputs = _parse_scenario_inputs(data)
-            total_duration = inputs["total_duration"]
-            time_step = inputs["time_step"]
-            ventilation_rate = inputs["ventilation_rate"]
-            room_height = inputs["room_height"]
-            room_area = inputs["room_area"]
-            modules = inputs["modules"]
-            equip_space = inputs["equip_space"]
-            units = inputs["units"]
-            lfl_percent = inputs["lfl_percent"]
-            propagation_delay = inputs["propagation_delay"]
-            vent_switch_conc = inputs["vent_switch_conc"]
-            emergency_vent_rate = inputs["emergency_vent_rate"]
+            total_duration = inputs.total_duration
+            time_step = inputs.time_step
+            ventilation_rate = inputs.ventilation_rate
+            room_height = inputs.room_height
+            room_area = inputs.room_area
+            modules = inputs.modules
+            equip_space = inputs.equip_space
+            units = inputs.units
+            lfl_percent = inputs.lfl_percent
+            propagation_delay = inputs.propagation_delay
+            vent_switch_conc = inputs.vent_switch_conc
+            emergency_vent_rate = inputs.emergency_vent_rate
             k_co2 = 1.5
 
             # Le Chatelier's LFL option
@@ -819,8 +1129,8 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                 individual_lfls[idx] = lfl_val if lfl_val and lfl_val > 0 else 0
 
             # Temperature-dependent LFL adjustment
-            if use_temp_dependent_lfl:
-                venting_temp = inputs["venting_temperature"]
+            if use_le_chatelier and use_temp_dependent_lfl:
+                venting_temp = inputs.venting_temperature
                 if venting_temp > 0:
                     temp_lfls = [
                         CO_TEMPERATURE_LFL_PARAMETER_A * venting_temp + CO_TEMPERATURE_LFL_PARAMETER_B,
@@ -852,9 +1162,14 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
             room_vol = (room_height * room_area) * (1 - (equip_space / 100))
             total_mods = int(modules * units)
             adj_ventilation_rate = (ventilation_rate / 1000) * room_area
-            adj_emergency_vent_rate, emergency_vent_enabled = setup_emergency_ventilation(vent_switch_conc, emergency_vent_rate, room_area)
-            emergency_vent_activated = False
-            total_vent_outflow = adj_ventilation_rate / room_vol
+            emergency_vent_state = init_emergency_ventilation(
+                ventilation_rate,
+                emergency_vent_rate,
+                room_area,
+                room_vol,
+                vent_switch_conc,
+            )
+            total_vent_outflow = emergency_vent_state["current_outflow"]
 
             # Cache gas densities
             densities = np.array([gas_data.get(label, {}).get("density", 0) or 0 for label in gas_labels])
@@ -870,16 +1185,11 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                     remaining -= 1
                     delay_count = 1
                     while remaining > 0:
-                        start_time = int(delay_count * propagation_delay)
+                        start_time = int(1 + delay_count * propagation_delay)
                         count = min(MODULES_PER_DELAY, remaining)
                         module_groups.append((start_time, count))
                         remaining -= count
                         delay_count += 1
-
-            # Resolve target gas for emergency ventilation
-            target_gas_map = {"CO": 0, "H2": 1, "Total Hydrocarbons": 2}
-            selected_target = _resolve_state_value(state, "selected_target_flam_gas", "CO")
-            target_gas_index = target_gas_map.get(selected_target, 0)
 
             # === Pre-compute total inflow matrix for all timesteps (vectorized per group) ===
             total_inflows_matrix = np.zeros((num_gases, num_steps))
@@ -901,12 +1211,13 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                 vv_concentrations[:, step_idx] = current_conc
                 mgl_concentrations[:, step_idx] = (current_conc / 100) * densities * 1000
 
-                # Emergency ventilation check
-                if emergency_vent_enabled and not emergency_vent_activated:
-                    if current_conc[target_gas_index] >= vent_switch_conc:
-                        emergency_vent_activated = True
-                        total_vent_outflow = adj_emergency_vent_rate / room_vol
-                        print(f"⚠️ Emergency ventilation ACTIVATED at t={time[step_idx]}s ({current_conc[target_gas_index]:.4f}% >= {vent_switch_conc}%)")
+                trigger_conc = float(np.sum(current_conc[:3]))
+                total_vent_outflow = maybe_activate_emergency_ventilation(
+                    emergency_vent_state,
+                    trigger_conc,
+                    time[step_idx],
+                    "Total Flammable Gas",
+                )
 
             # === Build result DataFrames ===
             flam_result_vv_df = pd.DataFrame({"Time (s)": time})
@@ -951,151 +1262,28 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                     adjusted_lfl = np.where(needs_correction, adjusted_lfl, lfl_mix)
                     adjusted_le_chatelier_lfl[valid_indices] = adjusted_lfl
 
-                lfl_curve_label = "Temperature-adjusted LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
+                lfl_curve_label = "Temperature-adjusted Le Chatelier LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
                 flam_result_vv_df["Le Chatelier LFL (v/v%)"] = adjusted_le_chatelier_lfl
                 print(f"Le Chatelier's LFL range: {np.nanmin(adjusted_le_chatelier_lfl):.4f}% - {np.nanmax(adjusted_le_chatelier_lfl):.4f}%")
             elif use_temp_dependent_lfl:
-                adjusted_le_chatelier_lfl = np.full(num_steps, float(lfl_percent), dtype=float)
-                lfl_curve_label = "Temperature-adjusted LFL"
-                flam_result_vv_df["Le Chatelier LFL (v/v%)"] = adjusted_le_chatelier_lfl
-                print(f"Temperature-adjusted LFL set to user input threshold: {lfl_percent:.4f}%")
+                print("Temperature-dependent LFL is enabled without Le Chatelier; standard user LFL threshold remains unchanged.")
 
-    # === Max module calculation (optimized using linearity of lfilter) ===
+    # === Max module calculation using shared threshold solver ===
             lfl_value = (lfl_percent * room_vol) / 100
-            vent_coeff = adj_ventilation_rate / room_vol
-            alpha = 1.0 - vent_coeff * time_step
-
-            if propagation_delay == 0:
-                time_arr_bs = np.arange(0, total_duration + 1, time_step)
-                num_steps_bs = len(time_arr_bs)
-
-                # All modules start simultaneously at t=1 — response is linear in module count
-                inflow_unit = np.zeros(num_steps_bs)
-                valid_mask = (time_arr_bs >= 1) & ((time_arr_bs - 1) < mod_duration)
-                local_times = (time_arr_bs[valid_mask] - 1).astype(np.intp)
-                inflow_unit[valid_mask] = combined_flam_flowrates[local_times] * time_step
-                response_unit = lfilter([1.0], [1.0, -alpha], inflow_unit)
-                peak_response = np.max(response_unit)
-
-                if peak_response > 0:
-                    max_modules = int(lfl_value / peak_response)
-                    # Verify boundary for floating point precision
-                    if max_modules > 0 and max_modules * peak_response >= lfl_value:
-                        max_modules -= 1
-                else:
-                    max_modules = 100000
-            else:
-                # Extend simulation to cover the ventilation decay time constant.
-                # The steady-state peak requires enough groups for the exponential
-                # decay tail to converge (5 time constants gives 99.3% convergence).
-                decay_time_constant = room_vol / adj_ventilation_rate if adj_ventilation_rate > 0 else total_duration
-                convergence_duration = int(5 * decay_time_constant)
-                # Also ensure we cover the module overlap window
-                overlap_duration = int(math.ceil(mod_duration / propagation_delay) + 1) * int(propagation_delay) + mod_duration
-                bs_duration = max(total_duration, convergence_duration, overlap_duration)
-                time_arr_bs = np.arange(0, bs_duration + 1, time_step)
-                num_steps_bs = len(time_arr_bs)
-                shift_samples = max(1, int(propagation_delay / time_step))
-
-                # Compute response for group 0 (1 module starting at t=1)
-                inflow_0 = np.zeros(num_steps_bs)
-                valid_mask = (time_arr_bs >= 1) & ((time_arr_bs - 1) < mod_duration)
-                if np.any(valid_mask):
-                    local_times = (time_arr_bs[valid_mask] - 1).astype(np.intp)
-                    inflow_0[valid_mask] = combined_flam_flowrates[local_times] * time_step
-                response_0 = lfilter([1.0], [1.0, -alpha], inflow_0)
-
-                # Compute base response for group 1 (1 module starting at t=propagation_delay)
-                # By LTI time-shift property, response for group k is response_1
-                # shifted right by (k-1)*shift_samples — no need for repeated lfilter calls
-                start_time_1 = int(propagation_delay)
-                inflow_1 = np.zeros(num_steps_bs)
-                valid_mask = (time_arr_bs >= start_time_1) & ((time_arr_bs - start_time_1) < mod_duration)
-                if np.any(valid_mask):
-                    local_times = (time_arr_bs[valid_mask] - start_time_1).astype(np.intp)
-                    inflow_1[valid_mask] = combined_flam_flowrates[local_times] * time_step
-                response_1 = lfilter([1.0], [1.0, -alpha], inflow_1)
-
-                # Determine total number of contributing groups
-                # A group at offset >= num_steps_bs cannot contribute to the simulation
-                max_groups = min(
-                    int(bs_duration / propagation_delay),
-                    (num_steps_bs - 1) // shift_samples
-                )
-
-                # Build cumulative shifted sum incrementally and record peak at each step.
-                # running_cum[n] = sum_{j=0}^{g-1} response_1[n - j*shift_samples]
-                # This correctly accounts for ALL overlapping group contributions.
-                running_cum = np.zeros(num_steps_bs)
-                # peak_full[g] = peak gas with g full delay groups (each MODULES_PER_DELAY modules)
-                # peak_partial[g] = peak gas with g full groups + 1 extra module at next position
-                peak_full = [np.max(response_0)]  # g=0: only group 0
-                peak_partial = []
-
-                for g in range(max_groups):
-                    offset = g * shift_samples
-                    if offset >= num_steps_bs:
-                        break
-
-                    # Shifted response_1 for this group position
-                    end_idx = num_steps_bs - offset
-                    shifted_slice = response_1[:end_idx]
-
-                    # peak_partial[g]: g full groups + 1 partial module at this position
-                    # Must check all timesteps (earlier ones have accumulated running_cum)
-                    full_partial_gas = response_0.copy()
-                    full_partial_gas += MODULES_PER_DELAY * running_cum
-                    full_partial_gas[offset:] += shifted_slice
-                    peak_partial.append(np.max(full_partial_gas))
-
-                    # Add this group's contribution to running cumulative
-                    running_cum[offset:] += shifted_slice
-
-                    # peak_full[g+1]: g+1 full groups
-                    peak_full.append(np.max(response_0 + MODULES_PER_DELAY * running_cum))
-
-                num_computed_groups = len(peak_full) - 1
-
-                # Steady-state check: if the fully converged peak doesn't exceed LFL
-                if peak_full[-1] < lfl_value and (not peak_partial or peak_partial[-1] < lfl_value):
-                    max_modules = 100000
-                else:
-                    # Binary search using precomputed peaks (monotonically non-decreasing)
-                    max_searchable = 1 + num_computed_groups * MODULES_PER_DELAY + (MODULES_PER_DELAY - 1)
-                    low = 1
-                    high = min(100000, max_searchable)
-                    max_modules = None
-
-                    while low <= high:
-                        mid = (low + high + 1) // 2
-                        remaining = mid - 1
-
-                        if remaining == 0:
-                            peak = peak_full[0]
-                        else:
-                            num_full_groups = remaining // MODULES_PER_DELAY
-                            partial = remaining % MODULES_PER_DELAY
-
-                            # Cap at computed range
-                            effective_full = min(num_full_groups, num_computed_groups)
-
-                            if partial == 0:
-                                peak = peak_full[effective_full]
-                            else:
-                                # Use peak_partial which includes the extra module
-                                if effective_full < len(peak_partial):
-                                    peak = peak_partial[effective_full]
-                                else:
-                                    # Beyond computed range — use last known full peak
-                                    peak = peak_full[-1]
-
-                        if peak >= lfl_value:
-                            high = mid - 1
-                        else:
-                            max_modules = mid
-                            low = mid + 1
-
-            flam_max_mods_val = max_modules if max_modules else 'NA - Exceeds Calc Limit'
+            modules_required = modules_required_flow_profile(
+                total_duration,
+                time_step,
+                propagation_delay,
+                combined_flam_flowrates,
+                room_vol,
+                adj_ventilation_rate,
+                lfl_value,
+            )
+            flam_max_mods_val = (
+                max_modules_before_threshold(modules_required)
+                if modules_required is not None
+                else 'NA - Exceeds Calc Limit'
+            )
             flam_max_mods = {"total_gas": flam_max_mods_val}
 
             # === Save results ===
@@ -1105,8 +1293,9 @@ def flammability_assessment_calc_graphical_method(parent, state, display_flammab
                 "flam_max_mod": flam_max_mods,
                 "input": data,
                 "use_le_chatelier": use_le_chatelier,
-                "le_chatelier_lfl_array": adjusted_le_chatelier_lfl if (use_le_chatelier or use_temp_dependent_lfl) else None,
-                "lfl_curve_array": adjusted_le_chatelier_lfl if (use_le_chatelier or use_temp_dependent_lfl) else None,
+                "use_temp_dependent_lfl": use_temp_dependent_lfl,
+                "le_chatelier_lfl_array": adjusted_le_chatelier_lfl if use_le_chatelier else None,
+                "lfl_curve_array": adjusted_le_chatelier_lfl if use_le_chatelier else None,
                 "lfl_curve_label": lfl_curve_label,
             }
         except ZeroDivisionError:

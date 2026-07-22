@@ -9,6 +9,7 @@ from LIB_funcs import clear_all_scenarios, data_submission, load_excel_data
 from miscfunc import load_file, import_gas_flowrate_data, generate_input_template
 import display_popup as display_popup_module
 from resulttable import open_results_table_window
+from saveload import save_program_state, load_program_state
 from calculations import (
     is_string_field,
     toxicity_assessment_calc,
@@ -17,6 +18,18 @@ from calculations import (
     determine_calc_method,
 )
 from sprinkler import activation_time_Calc
+
+
+# to do's:
+# add a calculation method to the input of the pdf report.
+# the result table builder needs ppm and % of the toxixity threshold
+# make it so that 1 second timesteps are always used for the quick caluclations. Big time steps can mess it up
+# need to decouple timestep from number of printed sheets
+# make data tables optional for the pdf export
+# add an input into the windows that specifies the project that is being run. Make it optional but helps to track what data is what.
+
+
+
 
 # ---------------------------------------------------------------------------
 # Theme definitions – applied globally via QApplication.setStyleSheet().
@@ -52,17 +65,10 @@ def return_to_intro_page(current_window):
     return intro_page  # Return the new window instance for further use if needed
 
 def save_file(self):
-    page = self.frames.get("LIBPages")
-    if page is None:
-        QMessageBox.warning(self, "Error", "Main window page not found.")
-        return
     save_program_state(self)
-    # to be saving a json file later, for now just a placeholder
-    QMessageBox.information(self, "Save File", "File saved successfully!")
-    
+
 def open_file(self):
-    # to be opening a json file later, for now just a placeholder
-    QMessageBox.information(self, "Open File", "File opened successfully!")
+    load_program_state(self)
 
 def ask_to_close(self):
     reply = QMessageBox.question(self, 'Exit', 'Are you sure you want to exit?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -180,9 +186,9 @@ class BaseWindow(QMainWindow):
         generate_template = dataMenu.addAction('Generate Template')
         generate_template.triggered.connect(lambda checked=False: generate_input_template(self))
         openFile = fileMenu.addAction('Open')
-        # openFile.triggered.connect(self.open_file) 
+        openFile.triggered.connect(lambda: open_file(self))
         saveFile = fileMenu.addAction('Save')
-        # saveFile.triggered.connect(lambda: save_file(self))
+        saveFile.triggered.connect(lambda: save_file(self))
         exitAction = fileMenu.addAction('Exit')
         exitAction.triggered.connect(lambda: ask_to_close(self))
 
@@ -356,6 +362,7 @@ class LIBPage(QWidget):
         # Initialize. Set Size and Title
         super().__init__()
         self.base_window = base_window
+        self._sheet_results = {}
 
 
         main_layout = QVBoxLayout(self)
@@ -405,12 +412,12 @@ class LIBPage(QWidget):
         # export to pdf button
         export_to_pdf = QPushButton("Export PDF Report")
         export_to_pdf.setToolTip("Click here to export a PDF report of the current scenarios and results.")
-        export_to_pdf.clicked.connect(lambda: pdf_results(tox_scenario_results=self.base_window.tox_scenario_results, flam_scenario_results=self.base_window.flam_scenario_results, title="Battery Off-gas Assessment Results"))
+        export_to_pdf.clicked.connect(self.export_current_sheet_pdf)
 
         # results table button
         results_table = QPushButton("Results Table")
         results_table.setToolTip("Open the results table builder for the current calculation results.")
-        results_table.clicked.connect(lambda: open_results_table_window(self.base_window, self.base_window))
+        results_table.clicked.connect(self.open_current_sheet_results_table)
         
         # --- add your widgets, with vertical separators between logical groups ---
         # Group 1: calculation method selector
@@ -437,6 +444,7 @@ class LIBPage(QWidget):
         self.tabs.setTabBar(RenamableTabBar())
         self.tabs.setTabsClosable(True)              # optional: X to close
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self._on_active_sheet_changed)
         self.tabs.setMovable(True)                    # optional: drag to reorder
 
         # "+" button in the corner of the tab bar
@@ -452,6 +460,27 @@ class LIBPage(QWidget):
 
         self.sheet_counter = 0
         self.add_sheet()   # start with one sheet
+
+    def _result_store_for_sheet(self, spreadsheet=None):
+        """Return the per-sheet result store for a tab, creating it if missing."""
+        if spreadsheet is None:
+            spreadsheet = self.current_spreadsheet()
+        if spreadsheet is None:
+            return {"tox": {}, "flam": {}}
+
+        key = id(spreadsheet)
+        if key not in self._sheet_results:
+            self._sheet_results[key] = {"tox": {}, "flam": {}}
+        return self._sheet_results[key]
+
+    def _sync_base_results_to_active_sheet(self):
+        """Bind base window result dicts to the currently selected sheet store."""
+        store = self._result_store_for_sheet()
+        self.base_window.tox_scenario_results = store["tox"]
+        self.base_window.flam_scenario_results = store["flam"]
+
+    def _on_active_sheet_changed(self, _index):
+        self._sync_base_results_to_active_sheet()
         
         
     def current_spreadsheet(self):
@@ -473,6 +502,7 @@ class LIBPage(QWidget):
         return spreadsheet.scenario_data
 
     def run_tox_calc(self):
+        self._sync_base_results_to_active_sheet()
         scenario_data = self.current_scenario_data()
         toxicity_assessment_calc(
             self.base_window,
@@ -483,6 +513,7 @@ class LIBPage(QWidget):
         )
 
     def run_flam_calc(self):
+        self._sync_base_results_to_active_sheet()
         print("DEBUG: Flam Calc button clicked")
         scenario_data = self.current_scenario_data()
         print(f"DEBUG: Current scenario data type={type(scenario_data).__name__}, rows={getattr(scenario_data, 'shape', (None,))[0] if hasattr(scenario_data, 'shape') else 'n/a'}")
@@ -514,6 +545,7 @@ class LIBPage(QWidget):
             )
 
     def clear_current_sheet(self):
+        self._sync_base_results_to_active_sheet()
         spreadsheet = self.current_spreadsheet()
         if spreadsheet is None:
             return
@@ -527,19 +559,39 @@ class LIBPage(QWidget):
             if not is_string_field(h):
                 spreadsheet._full_scenario_data[h] = np.nan
         spreadsheet.scenario_data = spreadsheet._full_scenario_data[:0]
+        if hasattr(spreadsheet, "_refresh_scenario_data_view"):
+            spreadsheet._refresh_scenario_data_view()
         spreadsheet.table.blockSignals(False)
         self.base_window.tox_scenario_results.clear()
         self.base_window.flam_scenario_results.clear()
 
+    def export_current_sheet_pdf(self):
+        self._sync_base_results_to_active_sheet()
+        pdf_results(
+            tox_scenario_results=self.base_window.tox_scenario_results,
+            flam_scenario_results=self.base_window.flam_scenario_results,
+            title="Battery Off-gas Assessment Results",
+        )
+
+    def open_current_sheet_results_table(self):
+        self._sync_base_results_to_active_sheet()
+        open_results_table_window(self.base_window, self.base_window)
+
     def add_sheet(self):
         self.sheet_counter += 1
         page = SpreadsheetWidget()
+        self._result_store_for_sheet(page)
         index = self.tabs.addTab(page, f"Sheet {self.sheet_counter}")
         self.tabs.setCurrentIndex(index)
+        self._sync_base_results_to_active_sheet()
 
     def close_tab(self, index):
         if self.tabs.count() > 1:      # keep at least one sheet
+            page = self.tabs.widget(index)
+            if page is not None:
+                self._sheet_results.pop(id(page), None)
             self.tabs.removeTab(index)
+            self._sync_base_results_to_active_sheet()
 
 
 class SprinklerPage(QWidget):
@@ -899,9 +951,9 @@ class PoolSpillPage(QWidget):
         self.oi_tickbox.setToolTip("Check this box to input the operator intervention time for the pool spill calculation. If unchecked, the volumetric flowrate will be used instead.")
         toolbarlayout.addWidget(self.oi_tickbox)
         
-        pool_fire_tickbox = QCheckBox('Pool Fire Duration')
-        pool_fire_tickbox.setToolTip("Check this box to calculate the pool fire duration, flame height, and heat release rate")
-        toolbarlayout.addWidget(pool_fire_tickbox)
+        self.pool_fire_tickbox = QCheckBox('Pool Fire Duration')
+        self.pool_fire_tickbox.setToolTip("Check this box to calculate the pool fire duration, flame height, and heat release rate")
+        toolbarlayout.addWidget(self.pool_fire_tickbox)
         
         calculate_button = QPushButton("Calculate")
         calculate_button.setToolTip("Click here to calculate the pool spill size and pool fire duration based on the input parameters.")
@@ -919,37 +971,47 @@ class PoolSpillPage(QWidget):
         main_layout = QHBoxLayout()
         main_layout.addStretch()
         
+        pool_source_label = QLabel("Pool size is determined based on the methodology provided in DETERMINATION OF FLAMMABLE LIQUID POOL SIZES AND THE RESULTANT HAZARDOUS DISTANCES - Paper No. PCIC energy EUR25_03\nby Doug Brooks, Allan Bozek, and Angelo Barberio")
+        fire_source_label = QLabel("Pool fire duration is determined based on the methodology provided in the two pool fire correlations using SFPE info\nMethod of Heskestad and Method of Thomas")
+        pool_source_label.setWordWrap(True)
+        fire_source_label.setWordWrap(True)
+        body_layout.addWidget(pool_source_label)
+        body_layout.addWidget(fire_source_label)
+        
+        warning_label = QLabel("The above calculations are based on principles developed in the Structural Design for Fire Safety, 2001. Calculations are based on certain assumptions and have inherent limitations. The results of such calculations may or may not have reasonable predictive capabilities for a given situation and should only be interpreted by an informed user. There is no absolute guarantee of the accuracy of these calculations.")
+        warning_label.setStyleSheet("color: red; font-weight: bold;")
+        warning_label.setWordWrap(True)
 
         #drop boxes
-        fuel_material = QComboBox()
-        fuel_material.setToolTip("Select the fuel material for the pool spill.")
-        fuel_material.addItems(list(POOL_SPREAD_DATA.keys()))
-        surface_weather = QComboBox()
-        surface_weather.setToolTip("Select the surface weather condition for the pool spill.")
-        surface_weather.addItems(list(POOL_PROPERTIES["relative_permeability"]))
+        self.fuel_material = QComboBox()
+        self.fuel_material.setToolTip("Select the fuel material for the pool spill.")
+        self.fuel_material.addItems(list(POOL_SPREAD_DATA.keys()))
+        self.surface_weather = QComboBox()
+        self.surface_weather.setToolTip("Select the surface weather condition for the pool spill.")
+        self.surface_weather.addItems(list(POOL_PROPERTIES["relative_permeability"]))
         
-        surface_material = QComboBox()
-        surface_material.setToolTip("Select the surface material for the pool spill.")
-        surface_material.addItems(list(POOL_PROPERTIES["intrinsic_permeability"]))
+        self.surface_material = QComboBox()
+        self.surface_material.setToolTip("Select the surface material for the pool spill.\nFrom Table 1 of 'DETERMINATION OF FLAMMABLE LIQUID POOL SIZES AND THE RESULTANT HAZARDOUS DISTANCES'")
+        self.surface_material.addItems(list(POOL_PROPERTIES["intrinsic_permeability"]))
         
-        ground_conditions = QComboBox()
-        ground_conditions.setToolTip("Select the ground conditions for the pool spill.")
-        ground_conditions.addItems(list(POOL_PROPERTIES["average_pool_height"]))
+        self.ground_conditions = QComboBox()
+        self.ground_conditions.setToolTip("Select the ground conditions for the pool spill.")
+        self.ground_conditions.addItems(list(POOL_PROPERTIES["average_pool_height"]))
         
-        orifice_condition = QComboBox()
-        orifice_condition.setToolTip("Select the orifice condition for the pool spill.")
-        orifice_condition.addItems(list(POOL_PROPERTIES["discharge_coefficients"]))
+        self.orifice_condition = QComboBox()
+        self.orifice_condition.setToolTip("Select the orifice condition for the pool spill.")
+        self.orifice_condition.addItems(list(POOL_PROPERTIES["discharge_coefficients"]))
         
         #user inputs
         
-        ambient_temperature = QLineEdit()
-        ambient_temperature.setToolTip("Enter the ambient temperature in kelvin.")
+        self.ambient_temperature = QLineEdit()
+        self.ambient_temperature.setToolTip("Enter the ambient temperature in kelvin.")
         
-        wind_speed = QLineEdit()
-        wind_speed.setToolTip("Enter the surface wind speed in meters per second.")
+        self.wind_speed = QLineEdit()
+        self.wind_speed.setToolTip("Enter the surface wind speed in meters per second.")
         
-        bund_size = QLineEdit()
-        bund_size.setToolTip("Enter the bund size in meters.")
+        self.bund_size = QLineEdit()
+        self.bund_size.setToolTip("Enter the bund size in meters.")
         
         self.operator_intervention_time = QLineEdit()
         self.operator_intervention_time.setToolTip("Enter the operator intervention time in seconds.")
@@ -960,8 +1022,8 @@ class PoolSpillPage(QWidget):
         self.delta_p = QLineEdit()
         self.delta_p.setToolTip("Enter the pressure differential in Pascals.")
         
-        volumetric_flowrate = QLineEdit()
-        volumetric_flowrate.setToolTip("Enter the volumetric flowrate in cubic meters per second.")
+        self.volumetric_flowrate = QLineEdit()
+        self.volumetric_flowrate.setToolTip("Enter the volumetric flowrate in cubic meters per second.")
         
         
                 # Input group
@@ -976,15 +1038,15 @@ class PoolSpillPage(QWidget):
         form_layout2.setHorizontalSpacing(15)
         form_layout2.setVerticalSpacing(10)
 
-        form_layout.addRow("Fuel Material:", fuel_material)
-        form_layout.addRow("Surface Weather:", surface_weather)
-        form_layout.addRow("Surface Material:", surface_material)
-        form_layout.addRow("Ground Conditions:", ground_conditions)
-        form_layout.addRow("Orifice Condition:", orifice_condition)
-        form_layout2.addRow("Ambient Temperature (K):",ambient_temperature)
-        form_layout2.addRow("Wind Speed (m/s):",wind_speed)
-        form_layout2.addRow("Bund Size (m):",bund_size)
-        form_layout2.addRow("Volumetric Flowrate (m³/s):",volumetric_flowrate)
+        form_layout.addRow("Fuel Material:", self.fuel_material)
+        form_layout.addRow("Surface Weather:", self.surface_weather)
+        form_layout.addRow("Surface Material:", self.surface_material)
+        form_layout.addRow("Ground Conditions:", self.ground_conditions)
+        form_layout.addRow("Orifice Condition:", self.orifice_condition)
+        form_layout2.addRow("Ambient Temperature (K):",self.ambient_temperature)
+        form_layout2.addRow("Wind Speed (m/s):",self.wind_speed)
+        form_layout2.addRow("Bund Size (m):",self.bund_size)
+        form_layout2.addRow("Volumetric Flowrate (m³/s):",self.volumetric_flowrate)
 
         
         input_group.setLayout(form_layout)
@@ -1012,6 +1074,7 @@ class PoolSpillPage(QWidget):
         self.optional_layout.addRow("Operator Intervention Time (s):", self.operator_intervention_time)
 
         main_layout.addWidget(self.optional_group)
+        body_layout.addWidget(warning_label)
 
         self.oi_tickbox.toggled.connect(self.toggle_optional_inputs)
         self.toggle_optional_inputs()
@@ -1026,11 +1089,11 @@ class ReceptorHeatFlux(QWidget):
         super().__init__()
         self.base_window = base_window
         
-        emissive_power = QLineEdit()
-        emissive_power.setToolTip("Enter the emissive power in kW/m².\nMust be greater than 0.")
+        self.emissive_power = QLineEdit()
+        self.emissive_power.setToolTip("Enter the emissive power in kW/m².\nMust be greater than 0.")
         
-        perpendicular_distance = QLineEdit()
-        perpendicular_distance.setToolTip("Enter the perpendicular distance from the fire source to the receptor in meters.\nMust be greater than 0.")
+        self.perpendicular_distance = QLineEdit()
+        self.perpendicular_distance.setToolTip("Enter the perpendicular distance from the fire source to the receptor in meters.\nMust be greater than 0.")
         
         
 

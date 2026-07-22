@@ -28,6 +28,7 @@ INPUT_SCHEMA = {
     "units":                ("Units",                        float, 0),
     "lfl":                  ("LFL (%)",                       float, 0),
     "lib_type":             ("LIB Type",                     str,   0),
+    'venting_temperature':  ("Venting Temperature (°C)",     float, 0),
     "mod_prop_delay":       ("Module Propagation Delay (s)", float, 180),
     "mod_capacity":         ("module_capacity_(kwh)",        float, 0),
     "battery_charge":       ("Battery Charge (%)",           float, 100),
@@ -525,3 +526,7 @@ SPRINKLER_PROPERTIES = {
 
 }
 
+
+MXC_VALUES = {
+    'argon': 6.15, 'neon': 9.20, 'nitrogen': 9.90, 'helium': 11.86, 'tetrafluoroethane': 11.98, 'carbon_dioxide':22.45, 'carbon_tetrafluoride': 33.43, 'sulfur_hexafluoride': 50.40
+}
