@@ -2,7 +2,7 @@ from PySide6.QtWidgets import QApplication, QFormLayout, QFrame, QGroupBox, QLin
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon, QAction
 from information import FIRE_PROPERTIES, COMBINED_INPUTS, POOL_SPREAD_DATA, REQ_LIB_INFO, USER_INPUTS, CALCULATION_METHODS, _THEMES, POOL_PROPERTIES, BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES, FLAMMABLE_GASES
-from pdf import pdf_results
+from pdf import pdf_generation
 import sys
 import numpy as np
 from LIB_funcs import clear_all_scenarios, data_submission, load_excel_data
@@ -567,11 +567,18 @@ class LIBPage(QWidget):
 
     def export_current_sheet_pdf(self):
         self._sync_base_results_to_active_sheet()
-        pdf_results(
+        exported_path = pdf_generation(
             tox_scenario_results=self.base_window.tox_scenario_results,
             flam_scenario_results=self.base_window.flam_scenario_results,
             title="Battery Off-gas Assessment Results",
+            gas_data=CHEMICAL_PROPERTIES,
         )
+        if exported_path:
+            QMessageBox.information(
+                self,
+                "PDF Export Complete",
+                f"PDF report exported successfully:\n{exported_path}",
+            )
 
     def open_current_sheet_results_table(self):
         self._sync_base_results_to_active_sheet()
