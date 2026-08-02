@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QApplication, QFormLayout, QFrame, QGroupBox, QLineEdit, QStackedWidget, QHeaderView, QCheckBox, QHBoxLayout, QInputDialog, QMainWindow, QDockWidget, QPushButton, QScrollArea, QSizePolicy, QTabBar, QTabWidget, QMessageBox, QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout, QWidget, QLabel, QVBoxLayout, QGridLayout, QTextEdit, QSlider, QProgressBar, QComboBox, QListWidget, QRadioButton
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QIcon, QAction
+from PySide6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence
 from information import FIRE_PROPERTIES, COMBINED_INPUTS, POOL_SPREAD_DATA, REQ_LIB_INFO, USER_INPUTS, CALCULATION_METHODS, _THEMES, POOL_PROPERTIES, BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES, FLAMMABLE_GASES
 from pdf import pdf_generation
 import sys
@@ -27,8 +27,12 @@ from sprinkler import activation_time_Calc
 # need to decouple timestep from number of printed sheets
 # make data tables optional for the pdf export
 # add an input into the windows that specifies the project that is being run. Make it optional but helps to track what data is what.
-
-
+# I want to make emergency ventilation not apart of the spreadhseet inputs but a separate tab to select or something
+# add button to delete specifcally results data and not affect the spreadsheet.
+# try to integrate a way to use the different calculation methods for different scenario rows as they may have different batteries that require different methods.
+# add a safety factor to the ventillation as some decimal which could account for reducing the perfect mixing.
+#add an option to toggle a 25% of LFL line to be put in the popup results plots.
+# add a way to add command + s shortcut to save current state.
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +131,13 @@ class BaseWindow(QMainWindow):
         self.use_temp_dependent_lfl = False
         self.selected_target_flam_gas = "CO"
         self.gas_flowrate_data = None
-                
+        
+        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self) # Add Command+S shortcut to save current state
+        save_shortcut.activated.connect(lambda: save_file(self))
+        
+        print_shortcut = QShortcut(QKeySequence("Ctrl+P"), self) # add command+p shortcut to export current sheet to pdf
+        print_shortcut.activated.connect(lambda: self.current_page().export_current_sheet_pdf() if hasattr(self.current_page(), 'export_current_sheet_pdf') else None)
+        
         self.create_menus()
         
         
