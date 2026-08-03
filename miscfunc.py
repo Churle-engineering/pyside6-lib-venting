@@ -302,7 +302,7 @@ def generate_input_template(state):
         QMessageBox.critical(None, "Template Error", f"An error occurred while creating the template:\n{str(e)}")
         
 
-def import_gas_flowrate_data(state):
+def import_gas_flowrate_data(state, store_attr="gas_flowrate_data"):
     """Import gas flowrate data from an Excel file for graphical flammability calculations.
 
     Expected sheets: co, h2, total_hydrocarbons, co2.
@@ -419,15 +419,18 @@ def import_gas_flowrate_data(state):
             interpolated_data[tab] = interpolated_data[tab][:common_len]
 
         uniform_time = np.arange(0, common_len, 1, dtype=int)
-        state.gas_flowrate_data = interpolated_data
+        if store_attr:
+            setattr(state, store_attr, interpolated_data)
 
         review = getattr(state, "flowrate_review_popup", None) or _show_flowrate_review_popup
         review(interpolated_data, uniform_time, expected_tabs)
 
         print(f"Gas flowrate data loaded: {common_len} time steps (0-{max(0, common_len - 1)}s) from {file_path}")
+        return interpolated_data
 
     except Exception as exc:
         QMessageBox.critical(parent, "Import Error", f"Failed to import gas flowrate data:\n{exc}")
+        return None
 
 
 def _show_flowrate_review_popup(interpolated_data, uniform_time, gas_labels):

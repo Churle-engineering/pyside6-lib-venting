@@ -508,11 +508,11 @@ def display_toxicity_result_popup(tox_scenario_results, tree, tox_gas_labels, ga
         controls_layout.addWidget(gas_options_area)
         toggle_gas_options.toggled.connect(gas_options_area.setVisible)
 
-        if "Total Gas (ppm)" not in df_vv.columns:
-            df_vv["Total Gas (ppm)"] = df_vv[[col for col in df_vv.columns if col.endswith("(v/v%)")]].sum(axis=1)
+        if "Total Gas (v/v%)" not in df_vv.columns:
+            df_vv["Total Gas (v/v%)"] = df_vv[[col for col in df_vv.columns if col.endswith("(v/v%)")]].sum(axis=1)
 
-        peak_idx_vv = df_vv["Total Gas (ppm)"].idxmax()
-        peak_value_vv = df_vv.loc[peak_idx_vv, "Total Gas (ppm)"]
+        peak_idx_vv = df_vv["Total Gas (v/v%)"].idxmax()
+        peak_value_vv = df_vv.loc[peak_idx_vv, "Total Gas (v/v%)"]
 
         canvas = FigureCanvasQTAgg(fig)
         canvas.setMinimumHeight(340)
@@ -536,7 +536,7 @@ def display_toxicity_result_popup(tox_scenario_results, tree, tox_gas_labels, ga
         peak_idx_mgl = df_mgl["Total Gas (mg/L)"].idxmax()
         peak_value_mgl = df_mgl.loc[peak_idx_mgl, "Total Gas (mg/L)"]
 
-        headers = ["Scenario", "Scenario Description", "Manufacturer", "Battery Room", "Modules", "Peak Total Gas (ppm)", "Peak Total Gas (mg/L)"]
+        headers = ["Scenario", "Scenario Description", "Manufacturer", "Battery Room", "Modules", "Peak Total Gas (v/v%)", "Peak Total Gas (mg/L)"]
         row_data = [scenario_name, scenario_description, manufacturer_name, battery_room, total_mods, f"{peak_value_vv:.4f}", f"{peak_value_mgl:.4f}"]
         groups = [("Scenario Info", 5), ("Peak Totals", 2)]
 
@@ -662,3 +662,289 @@ def display_toxicity_result_popup(tox_scenario_results, tree, tox_gas_labels, ga
     if app is not None:
         app.processEvents()
     return popup
+
+
+# ---------------------------------------------------------------------------
+# Inline render helpers – embed results directly into a parent widget
+# (used by the redesigned LIBPage instead of a separate popup dialog).
+# ---------------------------------------------------------------------------
+
+def render_flam_scenario_into(container, scenario_name, result_data, gas_data):
+    """Render a flammability scenario plot into *container* without a popup.
+
+    The container must already exist; its layout is created here if absent.
+    ``result_data`` is mutated to store the summary headers/row_data/groups so
+    the caller can build a separate bottom-strip summary widget.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+    import numpy as np
+
+    vv_df = result_data.get("flam_vv_df")
+    mgl_df = result_data.get("flam_mgl_df")
+    if vv_df is None or mgl_df is None:
+        return
+
+    input_data = result_data.get("input", {})
+    lfl_bat = float(input_data.get("LFL (%)", input_data.get("lfl_(%)", 0)))
+    lfl_curve_array = result_data.get("lfl_curve_array")
+    lfl_curve_label = result_data.get("lfl_curve_label") or "LFL"
+
+    gas_vv_columns = {}
+    for column in vv_df.columns:
+        if column == "Total Gas (v/v%)" or not column.endswith("(v/v%)"):
+            continue
+        gas_vv_columns.setdefault(_normalize_popup_gas_key(column), column)
+    gas_mgl_columns = {}
+    for column in mgl_df.columns:
+        if column == "Total Gas (mg/L)" or not column.endswith("(mg/L)"):
+            continue
+        gas_mgl_columns.setdefault(_normalize_popup_gas_key(column), column)
+
+    if "Total Gas (v/v%)" not in vv_df.columns:
+        cols = [gas_vv_columns[g] for g in FLAMMABLE_GAS_CANONICAL_ORDER if g in gas_vv_columns]
+        vv_df["Total Gas (v/v%)"] = vv_df[cols].sum(axis=1) if cols else 0
+    if "Total Gas (mg/L)" not in mgl_df.columns:
+        cols = [gas_mgl_columns[g] for g in FLAMMABLE_GAS_CANONICAL_ORDER if g in gas_mgl_columns]
+        mgl_df["Total Gas (mg/L)"] = mgl_df[cols].sum(axis=1) if cols else 0
+
+    available_gases = [g for g in FLAMMABLE_GAS_CANONICAL_ORDER if g in gas_vv_columns]
+    gas_colors = {"co": "#1f77b4", "h2": "#2ca02c", "total_hydrocarbons": "#9467bd"}
+    vv_max = vv_df["Total Gas (v/v%)"].max()
+    mgl_max = mgl_df["Total Gas (mg/L)"].max()
+    max_mods = result_data.get("flam_max_mod", {})
+
+    fig = Figure(figsize=(8, 5), dpi=100)
+    ax = fig.add_subplot(111)
+    gas_checkboxes: dict = {}
+
+    def update_plot():
+        ax.clear()
+        y_candidates = [vv_max]
+        ax.plot(vv_df["Time (s)"], vv_df["Total Gas (v/v%)"],
+                label="Total Gas (v/v%)", linestyle='-', linewidth=2.5, color='black')
+        for gas in available_gases:
+            cb = gas_checkboxes.get(gas)
+            if cb and cb.isChecked():
+                col = gas_vv_columns[gas]
+                series = vv_df[col]
+                y_candidates.append(float(series.max()))
+                ax.plot(vv_df["Time (s)"], series,
+                        label=FLAMMABLE_GAS_LABELS.get(gas, gas),
+                        linewidth=2, color=gas_colors.get(gas, 'gray'))
+                ind_lfl = gas_data.get(gas, {}).get("lfl")
+                if ind_lfl and ind_lfl > 0:
+                    y_candidates.append(float(ind_lfl))
+                    ax.axhline(y=ind_lfl, color=gas_colors.get(gas, 'gray'),
+                               linestyle=':', linewidth=1.8,
+                               label=f"{FLAMMABLE_GAS_LABELS.get(gas, gas)} LFL ({ind_lfl}%)")
+        if lfl_curve_array is not None:
+            finite = np.isfinite(lfl_curve_array)
+            if np.any(finite):
+                y_candidates.append(float(np.max(lfl_curve_array[finite])))
+                ax.plot(vv_df["Time (s)"], lfl_curve_array,
+                        label=lfl_curve_label, linestyle='--', linewidth=2, color='darkorange')
+        elif lfl_bat:
+            y_candidates.append(lfl_bat)
+            ax.axhline(y=lfl_bat, color='crimson', linestyle=':', linewidth=2,
+                       label=f"LFL ({lfl_bat}%)")
+        y_top = max(y_candidates) * 1.15 if y_candidates else 1
+        ax.set_ylim(bottom=0, top=y_top or 1)
+        ax.set_title(f"{scenario_name} — Gas Concentration Over Time", fontsize=12, fontweight='bold')
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel("Concentration (v/v%)", fontsize=10)
+        ax.tick_params(labelsize=9)
+        ax.legend(fontsize=9, loc='upper right', framealpha=0.9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        fig.tight_layout()
+        canvas.draw_idle()
+
+    canvas = FigureCanvasQTAgg(fig)
+    canvas.setMinimumHeight(340)
+
+    controls = QWidget()
+    ctrl_layout = QHBoxLayout(controls)
+    ctrl_layout.setContentsMargins(4, 2, 4, 2)
+    gas_label = QLabel("Individual gases: ")
+    ctrl_layout.addWidget(gas_label)
+    for gas in available_gases:
+        cb = QCheckBox(FLAMMABLE_GAS_LABELS.get(gas, gas))
+        cb.setChecked(False)
+        gas_checkboxes[gas] = cb
+        cb.stateChanged.connect(lambda _: update_plot())
+        ctrl_layout.addWidget(cb)
+    ctrl_layout.addStretch()
+
+    nav = NavigationToolbar2QT(canvas, container)
+
+    layout = container.layout()
+    if layout is None:
+        layout = QVBoxLayout(container)
+        container.setLayout(layout)
+    layout.setContentsMargins(4, 4, 4, 4)
+    layout.addWidget(controls)
+    layout.addWidget(canvas, 1)
+    layout.addWidget(nav)
+
+    update_plot()
+    result_data["flam_plot_fig"] = fig
+
+    # Store summary data for the bottom-strip (no widget added here)
+    manufacturer_name = input_data.get("manufacturer_name")
+    scenario_description = input_data.get("Scenario Description")
+    battery_room = input_data.get("battery_room")
+    mods = float(input_data.get("Modules per", input_data.get("Modules per unit", 0)))
+    units = float(input_data.get("Units", 0))
+    headers = ["Scenario", "Description", "Manufacturer name", "Battery room", "Modules", "Units",
+               "Peak Total Conc. (v/v%)", "Peak Total Gas (mg/L)", "(%) of LFL", "Max Modules Before LFL"]
+    row_data = [
+        scenario_name, scenario_description, manufacturer_name, battery_room, mods, units,
+        f"{vv_max:.4f}", f"{mgl_max:.4f}",
+        f"{(vv_max / lfl_bat) * 100 if lfl_bat else 0:.3f}",
+        max_mods.get("total_gas", "N/A"),
+    ]
+    result_data["flam_summary_headers"] = headers
+    result_data["flam_summary_row_data"] = row_data
+    result_data["flam_summary_groups"] = [("Scenario Info", 6), ("Peak Results", 4)]
+
+
+def render_tox_scenario_into(container, scenario_name, result_data, tox_gas_labels, gas_data):
+    """Render a toxicity scenario plot into *container* without a popup.
+
+    Analogous to :func:`render_flam_scenario_into`.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QLabel
+    import matplotlib.cm as cm
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
+    from typing import Any, cast
+
+    df_vv = result_data.get("tox_vv_df")
+    df_mgl = result_data.get("tox_mgl_df")
+    if df_vv is None or df_mgl is None:
+        return
+
+    input_data = result_data.get("input", {})
+    valid_gases = [label for label in tox_gas_labels if f"{label} (mg/L)" in df_mgl.columns]
+
+    color_count = len(valid_gases) or 1
+    get_cmap_fn = getattr(cm, "get_cmap", None)
+    if callable(get_cmap_fn):
+        colors = cast(Any, get_cmap_fn('tab10', color_count))
+    else:
+        import matplotlib
+        colors = cast(Any, matplotlib.colormaps.get_cmap('tab10').resampled(color_count))
+    gas_colors = {gas: colors(idx) for idx, gas in enumerate(valid_gases)}
+    gas_checkboxes: dict = {}
+    default_deselected = {"methanol", "dmc", "c2h5f", "propane", "h2o"}
+
+    fig = Figure(figsize=(8, 5), dpi=100)
+    ax = fig.add_subplot(111)
+
+    def update_plot():
+        ax.clear()
+        selected = [g for g in valid_gases if gas_checkboxes.get(g) and gas_checkboxes[g].isChecked()]
+        y_values, erpg_values = [], []
+        for gas in selected:
+            col = f"{gas} (mg/L)"
+            y = df_mgl[col]
+            y_values.extend(y.tolist())
+            ax.plot(df_mgl["Time (s)"], y, label=gas, linewidth=2.5, color=gas_colors[gas])
+        for gas in selected:
+            erpg3 = gas_data.get(gas, {}).get("erpg_3")
+            if erpg3 and erpg3 > 0:
+                erpg_values.append(erpg3)
+                ax.axhline(y=erpg3, color=gas_colors[gas], linestyle=':', linewidth=1.8,
+                           label=f"{gas} ERPG-3")
+        if y_values or erpg_values:
+            ax.set_ylim(bottom=0, top=max(y_values + erpg_values) * 1.1)
+        else:
+            ax.set_ylim(bottom=0, top=1)
+            ax.text(0.5, 0.5, "No toxic gas species selected", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11)
+        ax.set_title(f"{scenario_name} — Toxic Gas Concentrations", fontsize=12, fontweight='bold')
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel("Concentration (mg/L)", fontsize=10)
+        ax.tick_params(labelsize=9)
+        handles, _ = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        fig.tight_layout()
+        canvas.draw_idle()
+
+    canvas = FigureCanvasQTAgg(fig)
+    canvas.setMinimumHeight(340)
+
+    controls = QWidget()
+    ctrl_layout = QHBoxLayout(controls)
+    ctrl_layout.setContentsMargins(4, 2, 4, 2)
+    ctrl_layout.addWidget(QLabel("Gases: "))
+    for gas in valid_gases:
+        cb = QCheckBox(gas)
+        cb.setChecked(gas not in default_deselected)
+        gas_checkboxes[gas] = cb
+        cb.stateChanged.connect(lambda _: update_plot())
+        ctrl_layout.addWidget(cb)
+    ctrl_layout.addStretch()
+
+    nav = NavigationToolbar2QT(canvas, container)
+
+    layout = container.layout()
+    if layout is None:
+        layout = QVBoxLayout(container)
+        container.setLayout(layout)
+    layout.setContentsMargins(4, 4, 4, 4)
+    layout.addWidget(controls)
+    layout.addWidget(canvas, 1)
+    layout.addWidget(nav)
+
+    update_plot()
+    result_data["tox_plot_fig"] = fig
+
+    # Build summary data for the bottom-strip
+    if "Total Gas (v/v%)" not in df_vv.columns:
+        df_vv["Total Gas (v/v%)"] = df_vv[[col for col in df_vv.columns if col.endswith("(v/v%)")]].sum(axis=1)
+    if "Total Gas (mg/L)" not in df_mgl.columns:
+        mg_cols = [f"{g} (mg/L)" for g in valid_gases if f"{g} (mg/L)" in df_mgl.columns]
+        df_mgl["Total Gas (mg/L)"] = df_mgl[mg_cols].sum(axis=1)
+
+    peak_vv = df_vv["Total Gas (v/v%)"].max()
+    peak_mgl = df_mgl["Total Gas (mg/L)"].max()
+    manufacturer_name = input_data.get("manufacturer_name", "")
+    scenario_description = input_data.get("Scenario Description", "")
+    battery_room = input_data.get("battery_room", "")
+    total_mods = float(input_data.get("Modules per", 0)) * float(input_data.get("Units", 0))
+
+    headers = ["Scenario", "Scenario Description", "Manufacturer", "Battery Room", "Modules",
+               "Peak Total Gas (v/v%)", "Peak Total Gas (mg/L)"]
+    row_data = [scenario_name, scenario_description, manufacturer_name, battery_room, total_mods,
+                f"{peak_vv:.4f}", f"{peak_mgl:.4f}"]
+    groups = [("Scenario Info", 5), ("Peak Totals", 2)]
+    max_mods = result_data.get("tox_max_mod", {})
+    for gas in valid_gases:
+        vv_col = f"{gas} (v/v%)"
+        mgl_col = f"{gas} (mg/L)"
+        erpg3 = gas_data.get(gas, {}).get("erpg_3", 0)
+        max_vv = df_vv[vv_col].max() if vv_col in df_vv.columns else 0
+        max_mgl_val = df_mgl[mgl_col].max() if mgl_col in df_mgl.columns else 0
+        pct_erpg3 = (max_mgl_val / erpg3) * 100 if erpg3 else 0
+        headers.extend([f"{gas} (ppm)", f"{gas} (mg/L)", f"{gas} % of ERPG-3"])
+        row_data.extend([f"{max_vv:.4f}", f"{max_mgl_val:.4f}", f"{pct_erpg3:.2f}"])
+        groups.append((gas, 3))
+    if valid_gases:
+        for gas in valid_gases:
+            mod = max_mods.get(gas, 0)
+            headers.append(f"{gas} Max Mod")
+            try:
+                row_data.append(f"{float(mod):.1f}")
+            except (TypeError, ValueError):
+                row_data.append(str(mod))
+        groups.append(("Max Modules Before ERPG-3", len(valid_gases)))
+
+    result_data["tox_summary_headers"] = headers
+    result_data["tox_summary_row_data"] = row_data
+    result_data["tox_summary_groups"] = groups

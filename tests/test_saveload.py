@@ -4,6 +4,8 @@ import sys
 import tempfile
 import unittest
 
+import pandas as pd
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication
@@ -36,13 +38,52 @@ class SaveLoadRoundTripTests(unittest.TestCase):
         window = _build_window()
 
         lib_page = window.page["LIBPage"]
-        spreadsheet = lib_page.current_spreadsheet()
-        spreadsheet.table.setItem(0, 0, __import__("PySide6.QtWidgets", fromlist=["QTableWidgetItem"]).QTableWidgetItem("Test Scenario"))
-        spreadsheet.on_cell_changed(0, 0)
-        lib_page._sheet_results[id(spreadsheet)]["tox"]["Scenario 1"] = {
-            "tox_max_mod": {"co": 3},
-            "calc_method": "Module Volume UL9540A",
-            "input": {"foo": 1.0},
+
+        # Build a deterministic scenario tree: Project -> Type -> Scenario.
+        tree_widget = lib_page.scenario_tree
+        tree_widget.tree.clear()
+        globals_map = tree_widget._add_project.__globals__
+        project_cls = globals_map["ProjectTreeItem"]
+        type_cls = globals_map["ScenarioTypeTreeItem"]
+        scenario_cls = globals_map["ScenarioTreeItem"]
+
+        project = project_cls("Project A")
+        tree_widget.tree.addTopLevelItem(project)
+        scenario_type = type_cls("Type A")
+        project.addChild(scenario_type)
+        scenario_payload = {
+            "Scenario Description": "Scenario 1",
+            "LIB Type": "Custom-LIB-1",
+            "Calculation Duration (s)": "600",
+            "Ventilation Rate (L/s/m2)": "5",
+        }
+        scenario_item = scenario_cls("Scenario 1", data=scenario_payload)
+        scenario_type.addChild(scenario_item)
+
+        window.custom_lib_definitions["Custom-LIB-1"] = {
+            "LFL (%)": "4.0",
+            "Battery Charge (%)": "100",
+            "CO (%)": "5",
+            "CO2 (%)": "10",
+            "H2 (%)": "25",
+            "Total Hydrocarbons (%)": "60",
+        }
+        window.custom_composition_definitions["Comp-1"] = {
+            "co": 5.0,
+            "co2": 10.0,
+            "h2": 25.0,
+            "total_hydrocarbons": 60.0,
+        }
+
+        window.tox_scenario_results["Scenario 1"] = {
+            "tox_vv_df": pd.DataFrame({"Time (s)": [0.0, 1.0], "CO (ppm)": [0.0, 50.0]}),
+            "tox_summary_headers": ["Scenario"],
+            "tox_summary_row_data": ["Scenario 1"],
+        }
+        window.flam_scenario_results["Scenario 1"] = {
+            "flam_vv_df": pd.DataFrame({"Time (s)": [0.0, 1.0], "% LFL": [0.0, 15.0]}),
+            "flam_summary_headers": ["Scenario"],
+            "flam_summary_row_data": ["Scenario 1"],
         }
 
         sprinkler_page = window.page["SprinklerPage"]
@@ -68,11 +109,24 @@ class SaveLoadRoundTripTests(unittest.TestCase):
             restore_program_state(new_window, reloaded_payload)
 
             new_lib_page = new_window.page["LIBPage"]
-            new_spreadsheet = new_lib_page.current_spreadsheet()
-            self.assertEqual(new_spreadsheet.table.item(0, 0).text(), "Test Scenario")
-            new_store = new_lib_page._sheet_results[id(new_spreadsheet)]
-            self.assertIn("Scenario 1", new_store["tox"])
-            self.assertEqual(new_store["tox"]["Scenario 1"]["tox_max_mod"]["co"], 3)
+            root = new_lib_page.scenario_tree.tree.invisibleRootItem()
+            self.assertEqual(root.childCount(), 1)
+            self.assertEqual(root.child(0).project_name, "Project A")
+            self.assertEqual(root.child(0).childCount(), 1)
+            self.assertEqual(root.child(0).child(0).type_name, "Type A")
+            self.assertEqual(root.child(0).child(0).childCount(), 1)
+            restored_scenario = root.child(0).child(0).child(0)
+            self.assertEqual(restored_scenario.scenario_name, "Scenario 1")
+            self.assertEqual(restored_scenario.scenario_data["LIB Type"], "Custom-LIB-1")
+
+            self.assertIn("Scenario 1", new_window.tox_scenario_results)
+            self.assertIn("Scenario 1", new_window.flam_scenario_results)
+            tox_df = new_window.tox_scenario_results["Scenario 1"]["tox_vv_df"]
+            flam_df = new_window.flam_scenario_results["Scenario 1"]["flam_vv_df"]
+            self.assertEqual(float(tox_df["CO (ppm)"].iloc[-1]), 50.0)
+            self.assertEqual(float(flam_df["% LFL"].iloc[-1]), 15.0)
+            self.assertIn("Custom-LIB-1", new_window.custom_lib_definitions)
+            self.assertIn("Comp-1", new_window.custom_composition_definitions)
 
             new_sprinkler_page = new_window.page["SprinklerPage"]
             self.assertEqual(new_sprinkler_page.sprinkler_id.text(), "SPK-42")
@@ -84,6 +138,36 @@ class SaveLoadRoundTripTests(unittest.TestCase):
             self.assertTrue(new_pool_page.oi_tickbox.isChecked())
         finally:
             os.remove(path)
+
+    def test_user_defined_composition_uses_direct_total_volume_percentages(self):
+        window = _build_window()
+        lib_page = window.page["LIBPage"]
+
+        window.custom_composition_definitions["Comp-Direct"] = {
+            "co": 10.0,
+            "h2": 5.0,
+            "total_hydrocarbons": 5.0,
+            "co2": 20.0,
+        }
+
+        scenario = {
+            "Scenario Description": "User Comp Scenario",
+            "Composition Method": "User Defined",
+            "Gas Composition": "Comp-Direct",
+            "LIB Type": "NMC",
+        }
+
+        merged = lib_page._apply_composition_to_scenario(scenario)
+
+        # Toxic share should be the sum of toxic composition percentages.
+        self.assertAlmostEqual(float(merged.get("_percent_tox_override", -1)), 40.0)
+
+        # Flammable share should be absolute % of total volume,
+        # while per-gas flammable fields are normalized to a 100% split.
+        self.assertAlmostEqual(float(merged.get("_flam_percent_override", -1)), 20.0)
+        self.assertAlmostEqual(float(merged.get("co_(%)", -1)), 50.0)
+        self.assertAlmostEqual(float(merged.get("h2_(%)", -1)), 25.0)
+        self.assertAlmostEqual(float(merged.get("total_hydrocarbons_(%)", -1)), 25.0)
 
 
 if __name__ == "__main__":

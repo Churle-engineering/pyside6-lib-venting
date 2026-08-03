@@ -3,7 +3,7 @@
 TARGET_FLAM_GAS = ["CO", "H2", "Total Hydrocarbons"]
 LIB_TYPE = ["NMC", "LFP", "LCO"]
 REQ_LIB_INFO = ["Manufacturer name","Battery room","LFL (%)","Cell Duration (s)","Module Duration (s)","Venting Temperature (°C)","Cell Amp Hr (Ah)","Module Amp Hr (Ah)","Module Capacity (kWh)","Cell Volume (L)","Module Volume (L)","Battery Charge (%)","CO (%)","CO2 (%)","H2 (%)","Total Hydrocarbons (%)"]
-USER_INPUTS = ["Scenario Description", "Room Area (m2)","Room Height (m)","Equipment Space (%)","Ventilation Rate (L/s/m2)","Module Propagation Delay (s)","Cells per","Modules per","Units","Calculation Duration (s)","Time Step (s)","LIB Type","Vent Switch Conc (%)","Emergency Vent Rate (L/s/m2)"]
+USER_INPUTS = ["Scenario Description", "Room Area (m2)","Room Height (m)","Equipment Space (%)","Ventilation Rate (L/s/m2)","Module Propagation Delay (s)","Cells per","Modules per","Units","Calculation Duration (s)","LIB Type","Vent Switch Conc (%)","Emergency Vent Rate (L/s/m2)"]
 CALCULATION_METHODS = ["Cell Volume UL9540A", "Module Volume UL9540A", "Module Capacity", "Module Variable Flowrate"]
 UL_TEST_GASSES = ["CO","CO2","H2","Total Hydrocarbons"]
 # COMBINED_INPUTS = USER_INPUTS + REQ_LIB_INFO
@@ -17,7 +17,6 @@ INPUT_SCHEMA = {
     "room_area":            ("Room Area (m2)",               float, 0),
     "equip_space":          ("Equipment Space (%)",          float, 0),
     "calc_duration":        ("Calculation Duration (s)",     lambda x: int(float(x)), 0),
-    "time_step":            ("Time Step (s)",                lambda x: int(float(x)), 1),
     "ventilation_rate":     ("Ventilation Rate (L/s/m2)",    float, 0),
     "cell_volume":          ("cell_volume_(l)",              float, 0),
     "cell_duration":        ("cell_duration_(s)",            float, 0),
@@ -53,6 +52,7 @@ GAS_LABEL_FIX = {
     "benzene": "Benzene",
     "no2": "NO₂",
     "toluene": "Toluene",
+    "Total Gas (v/v%)": "Total Gas",
     "Total Gas (ppm)": "Total Gas",
     "total_gas": "Total Gas",
     "total_hydrocarbons": "Total Hydrocarbons"
@@ -68,7 +68,6 @@ TOOLTIPS = {
     "Modules per": "Number of modules per unit",
     "Units": "Number of LIB units",
     "Calculation Duration (s)": "Total simulation time",
-    "Time Step (s)": "Calculation time increment",
     "LIB Type": "Lithium-ion battery chemistry type",
     "Vent Switch Conc (%)": "Total gas concentration (%) at which ventilation switches to emergency rate. Set to 0 to disable.",
     "Emergency Vent Rate (L/s/m2)": "Ventilation rate to switch to when concentration threshold is reached. Set to 0 to disable."
@@ -97,7 +96,7 @@ Chemistry types supported: NMC, LFP, LCO
 BATTERY_CHEMISTRY_DATA = {
     'NMC': {
         'percent_tox': 30.66753,      # Percentage toxic gases (literature-based)
-        'percent_flam': 100,     # Percentage flammable gases (literature-based) add back 84.68538
+        'percent_flam': 84.68538,     # Percentage flammable gases (literature-based) add back 84.68538
         'specific_capacity': 458.266894,  # L/kWh - specific capacity for module calculations
         'tox_gas_composition': {
             'co': 38.1,               # Carbon monoxide
@@ -115,6 +114,11 @@ BATTERY_CHEMISTRY_DATA = {
             'propane': 1.5,
             'no':4,
             'h2o':5
+        },
+        'flam_gas_composition': {
+            'co_(%)': 80,  # Carbon monoxide
+            'h2_(%)': 10.0,       # Hydrogen
+            'total_hydrocarbons_(%)': 10.0,  # Total hydrocarbons
         },
         'description': 'Nickel Manganese Cobalt Oxide (NMC) - High energy density cathode material',
         'reference': 'DNV.GL Technical Reference for Li-ion Battery Explosion Risk and Fire Suppression + additional data'
@@ -140,6 +144,11 @@ BATTERY_CHEMISTRY_DATA = {
             'no':1,
             'pf3':0.5
         },
+        'flam_gas_composition': {
+            'co_(%)': 80,  # Carbon monoxide
+            'h2_(%)': 10.0,       # Hydrogen
+            'total_hydrocarbons_(%)': 10.0,  # Total hydrocarbons
+        },
         'description': 'Lithium Iron Phosphate (LFP) - Safer, more stable cathode material',
         'reference': 'DNV.GL Technical Reference for Li-ion Battery Explosion Risk and Fire Suppression'
     },
@@ -160,10 +169,17 @@ BATTERY_CHEMISTRY_DATA = {
             'propane': 1.19617,
             'xylene': 1.19617
         },
+        'flam_gas_composition': {
+            'co_(%)': 80,  # Carbon monoxide
+            'h2_(%)': 10.0,       # Hydrogen
+            'total_hydrocarbons_(%)': 10.0,  # Total hydrocarbons
+        },
         'description': 'Lithium Cobalt Oxide (LCO) - High energy density, consumer electronics',
         'reference': 'DNV.GL Technical Reference for Li-ion Battery Explosion Risk and Fire Suppression'
     }
 }
+
+
 
 # ============================================================================
 # GAS LABELS AND SETS
@@ -198,7 +214,7 @@ LIB_TYPE_SPECIFIC_CAPACITY = {
     'LCO': 378.135
 }
 
-
+COMPOSITION_METHODS = ["Literature Data", "UL9540A Flam Data", "User Defined"]
 
 # Data sourced from "Chem property data txt" folder text files.
 # density: g/L (or kg/m3 as provided in source data, e.g. water in kg/m3)
@@ -206,27 +222,28 @@ LIB_TYPE_SPECIFIC_CAPACITY = {
 # lfl: Lower Flammable Limit (%). None if N/A / not flammable.
 # molecular_weight: g/mol. None if N/A.
 CHEMICAL_PROPERTIES = {
-    'benzene': {'density': 3.313, 'erpg_3': 3.313, 'lfl': 1.4, 'molecular_weight': 78.11, 'toxicity_factor': 1.0},
-    'toluene': {'density': 3.755, 'erpg_3': 3.755, 'lfl': 1.3, 'molecular_weight': 92.13842, 'toxicity_factor': 0.5},
-    'co': {'density': 0.967, 'erpg_3': 0.484, 'lfl': 12.5, 'molecular_weight': 28.0101, 'toxicity_factor': 1.0},
-    'co2': {'density': 1.830, 'erpg_3': 0.000, 'lfl': None, 'molecular_weight': 44.0095, 'toxicity_factor': 1.0},
-    'no2': {'density': 1.890, 'erpg_3': 0.057, 'lfl': None, 'molecular_weight': 46.01, 'toxicity_factor': 1.0},
-    'hcl': {'density': 1.517, 'erpg_3': 0.227, 'lfl': None, 'molecular_weight': 36.46, 'toxicity_factor': 1.0},
-    'hf': {'density': 0.825, 'erpg_3': 0.041, 'lfl': None, 'molecular_weight': 20.01, 'toxicity_factor': 1.0},
-    'hcn': {'density': 1.078, 'erpg_3': 0.027, 'lfl': 5.6, 'molecular_weight': 27.0253, 'toxicity_factor': 1.0},
-    'so2': {'molecular_weight': 64.07, 'toxicity_factor': 1.0},
-    'c2h5f': {'density': 2.14, 'erpg_3': 260000, 'lfl': 2.6, 'molecular_weight': 48.0601, 'toxicity_factor': 1.0},
-    'methanol': {'density': 1.11, 'erpg_3': 145000, 'lfl': 6, 'molecular_weight': 32.042, 'toxicity_factor': 1.0},
-    'emc': {'molecular_weight': 88.06, 'toxicity_factor': 1.0},
-    'dmc': {'density': 3.1, 'erpg_3': 140, 'lfl': 4.2, 'molecular_weight': 90.08, 'toxicity_factor': 1.0},
-    'dec': {'density': 4.1, 'erpg_3': 21, 'lfl': 4.2, 'molecular_weight': 118.13, 'toxicity_factor': 1.0},
-    'propane': {'density': 0.86, 'erpg_3': 180000, 'lfl': 2.1, 'molecular_weight': 44.10, 'toxicity_factor': 1.0},
-    'xylene': {'density': 3.7, 'erpg_3': 2500, 'lfl': 1.7, 'molecular_weight': 106.17, 'toxicity_factor': 1.0},
-    'h2': {'density': 0.084, 'erpg_3': None, 'lfl': 4.0, 'molecular_weight': 2.01588, 'toxicity_factor': 1.0},
-    'h2o': {'density': 996.86, 'erpg_3': None, 'lfl': None, 'molecular_weight': 18.015, 'toxicity_factor': 1.0},
-    'pf3': {'density': 3.907, 'erpg_3': 10, 'lfl': None, 'molecular_weight': 87.97, 'toxicity_factor': 1.0},
-    'ch4': {'density': 0.664, 'erpg_3': None, 'lfl': 4.4, 'molecular_weight': 16.04, 'toxicity_factor': 1.0},
-    'total_hydrocarbons': {'density': 3.708, 'erpg_3': 0.000, 'lfl': 6.5, 'molecular_weight': None, 'toxicity_factor': 1.0},
+    'benzene': {'density': 3.313, 'erpg_3': 3.313, 'lfl': 1.4, 'molecular_weight': 78.11, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'toluene': {'density': 3.755, 'erpg_3': 3.755, 'lfl': 1.3, 'molecular_weight': 92.13842, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'co': {'density': 0.967, 'erpg_3': 0.484, 'lfl': 12.5, 'molecular_weight': 28.0101, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'co2': {'density': 1.830, 'erpg_3': 0.000, 'lfl': None, 'molecular_weight': 44.0095, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'no2': {'density': 1.890, 'erpg_3': 0.057, 'lfl': None, 'molecular_weight': 46.01, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'hcl': {'density': 1.517, 'erpg_3': 0.227, 'lfl': None, 'molecular_weight': 36.46, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'hf': {'density': 0.825, 'erpg_3': 0.041, 'lfl': None, 'molecular_weight': 20.01, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'hcn': {'density': 1.078, 'erpg_3': 0.027, 'lfl': 5.6, 'molecular_weight': 27.0253, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'so2': {'molecular_weight': 64.07, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'c2h5f': {'density': 2.14, 'erpg_3': 260000, 'lfl': 2.6, 'molecular_weight': 48.0601, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'methanol': {'density': 1.11, 'erpg_3': 145000, 'lfl': 6, 'molecular_weight': 32.042, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'emc': {'molecular_weight': 88.06, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'dmc': {'density': 3.1, 'erpg_3': 140, 'lfl': 4.2, 'molecular_weight': 90.08, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'dec': {'density': 4.1, 'erpg_3': 21, 'lfl': 4.2, 'molecular_weight': 118.13, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'propane': {'density': 0.86, 'erpg_3': 180000, 'lfl': 2.1, 'molecular_weight': 44.10, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'xylene': {'density': 3.7, 'erpg_3': 2500, 'lfl': 1.7, 'molecular_weight': 106.17, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'h2': {'density': 0.084, 'erpg_3': None, 'lfl': 4.0, 'molecular_weight': 2.01588, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'h2o': {'density': 996.86, 'erpg_3': None, 'lfl': None, 'molecular_weight': 18.015, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'pf3': {'density': 3.907, 'erpg_3': 10, 'lfl': None, 'molecular_weight': 87.97, 'toxicity_factor': 1.0, 'flammability_factor': 0},
+    'methane': {'density': 0.664, 'erpg_3': None, 'lfl': 4.4, 'molecular_weight': 16.04, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'total_hydrocarbons': {'density': 3.708, 'erpg_3': 0.000, 'lfl': 6.5, 'molecular_weight': None, 'toxicity_factor': 1.0, 'flammability_factor': 1},
+    'ethanol': {'density': 0.668, 'erpg_3': None, 'lfl': 5.0, 'molecular_weight': 46.08, 'toxicity_factor': 1.0, 'flammability_factor': 1}
 }
 
 
@@ -359,6 +376,13 @@ _THEMES: dict = {
         QScrollBar:vertical { background: #e8eef5; width: 12px; }
         QScrollBar::handle:vertical { background: #7aabdb; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #7aabdb; }
+        QWidget#scenarioTreeWidget { border: 1px solid #8ba9c7; border-radius: 6px;
+                                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                     stop:0 #eef4fb, stop:1 #dbe8f4); }
+        QWidget#scenarioTreeHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                     stop:0 #cdddf0, stop:1 #e7eff8);
+                                     border-bottom: 1px solid #8ba9c7; }
+        QTreeWidget#scenarioTreeInner { background: transparent; border: none; padding: 2px; }
     """,
     "Dark": """
         QWidget            { background-color: #1e1e2e; color: #cdd6f4; font-size: 13px; }
@@ -389,6 +413,13 @@ _THEMES: dict = {
         QScrollBar::handle:vertical { background: #585b70; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #585b70; }
         QLabel             { color: #cdd6f4; }
+        QWidget#scenarioTreeWidget { border: 1px solid #4c5064; border-radius: 6px;
+                                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                     stop:0 #25273a, stop:1 #1a1b2b); }
+        QWidget#scenarioTreeHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                     stop:0 #2f3247, stop:1 #222437);
+                                     border-bottom: 1px solid #4c5064; }
+        QTreeWidget#scenarioTreeInner { background: transparent; border: none; padding: 2px; }
     """,
     "Arup Red": """
         QWidget            { background-color: #fafafa; color: #1a1a1a; font-size: 13px; }
@@ -417,6 +448,13 @@ _THEMES: dict = {
         QScrollBar:vertical { background: #f5f5f5; width: 12px; }
         QScrollBar::handle:vertical { background: #e8001c; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #e8001c; }
+        QWidget#scenarioTreeWidget { border: 2px solid #cf102a; border-radius: 6px;
+                                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                     stop:0 #fff6f7, stop:1 #ffe6e9); }
+        QWidget#scenarioTreeHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                     stop:0 #ffd7dc, stop:1 #fff1f3);
+                                     border-bottom: 1px solid #cf102a; }
+        QTreeWidget#scenarioTreeInner { background: transparent; border: none; padding: 2px; }
     """,
     "High Contrast": """
         QWidget            { background-color: #000000; color: #ffffff; font-size: 13px; }
@@ -448,6 +486,13 @@ _THEMES: dict = {
         QScrollBar::handle:vertical { background: #ffffff; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #ffffff; }
         QLabel             { color: #ffffff; }
+        QWidget#scenarioTreeWidget { border: 2px solid #ffffff; border-radius: 6px;
+                                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                     stop:0 #1a1a1a, stop:1 #050505); }
+        QWidget#scenarioTreeHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                     stop:0 #2f2f2f, stop:1 #111111);
+                                     border-bottom: 1px solid #ffffff; }
+        QTreeWidget#scenarioTreeInner { background: transparent; border: none; padding: 2px; }
     """,
     "Warm Slate": """
         QWidget            { background-color: #f5f0eb; color: #2c1f14; font-size: 13px; }
@@ -476,6 +521,13 @@ _THEMES: dict = {
         QScrollBar:vertical { background: #ede4d8; width: 12px; }
         QScrollBar::handle:vertical { background: #c4a882; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #c4a882; }
+        QWidget#scenarioTreeWidget { border: 1px solid #ad8c66; border-radius: 6px;
+                                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                     stop:0 #fbf4ec, stop:1 #e8ddd1); }
+        QWidget#scenarioTreeHeader { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                     stop:0 #dcc5a8, stop:1 #f2e7d9);
+                                     border-bottom: 1px solid #ad8c66; }
+        QTreeWidget#scenarioTreeInner { background: transparent; border: none; padding: 2px; }
     """,
 }
 

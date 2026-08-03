@@ -1,6 +1,11 @@
 import unittest
 
-from calculations import normalize_gas_key, resolve_lfl_curve_labels, resolve_toxic_gas_densities
+from calculations import (
+    _parse_scenario_inputs,
+    normalize_gas_key,
+    resolve_lfl_curve_labels,
+    resolve_toxic_gas_densities,
+)
 from information import BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES
 
 
@@ -44,6 +49,32 @@ class LFLResolutionTests(unittest.TestCase):
             BATTERY_CHEMISTRY_DATA["NMC"]["tox_gas_composition"]
         )
         self.assertIn("h2o", nmc_labels)
+
+    def test_toxic_density_resolution_normalizes_percentages(self):
+        labels, percentages, _densities = resolve_toxic_gas_densities({
+            "co": 40,
+            "h2": 10,
+        })
+
+        self.assertEqual(labels, ["co", "h2"])
+        self.assertAlmostEqual(float(percentages.sum()), 1.0, places=9)
+        self.assertAlmostEqual(float(percentages[0] / percentages[1]), 4.0, places=9)
+
+    def test_parse_scenario_inputs_accepts_display_volume_aliases(self):
+        inputs = _parse_scenario_inputs({
+            "Calculation Duration (s)": "300",
+            "Cell Volume (L)": "1.5",
+            "Cell Duration (s)": "40",
+            "Module Volume (L)": "18",
+            "Module Duration (s)": "120",
+            "Module Capacity (kWh)": "0.8",
+        })
+
+        self.assertAlmostEqual(inputs.cell_volume, 1.5)
+        self.assertAlmostEqual(inputs.cell_duration, 40.0)
+        self.assertAlmostEqual(inputs.module_volume, 18.0)
+        self.assertAlmostEqual(inputs.module_duration, 120.0)
+        self.assertAlmostEqual(inputs.module_capacity, 0.8)
 
 
 if __name__ == "__main__":

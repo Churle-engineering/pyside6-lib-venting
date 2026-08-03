@@ -9,16 +9,16 @@ Chosen file format: JSON (stored with a ``.libsave`` extension).
 
 Why JSON rather than CSV?
     A CSV can only represent a single flat table. The program's state is a rich,
-    nested structure: several spreadsheet tabs, text-box inputs, dropdown
-    selections, and calculated results that contain whole pandas DataFrames
-    and numpy arrays (used to redraw the results plots). JSON captures all of
-    this in one human-readable, self-describing file.
+    nested structure: hierarchical scenario tree data, text-box inputs,
+    dropdown selections, and calculated results that contain whole pandas
+    DataFrames and numpy arrays (used to redraw the results plots). JSON
+    captures all of this in one human-readable, self-describing file.
 
 What gets saved:
-    * ``LIBPage``      - every spreadsheet tab (headers + cell values), the
-                          per-tab toxicity/flammability calculation results
-                          (including the DataFrames used to draw the result
-                          plots), and the toolbar option selections.
+    * ``LIBPage``      - the full project/type/scenario hierarchy from the
+                          scenario tree and toxicity/flammability calculation
+                          results (including the DataFrames used to draw the
+                          result plots).
     * ``SprinklerPage`` - all input fields and the last computed activation
                           result.
     * ``PoolSpillPage`` - all input fields and checkbox/option state.
@@ -30,9 +30,8 @@ Forwards / backwards compatibility:
     * The payload is a versioned dictionary of top-level, independent sections.
     * Every section is optional on load; missing keys are skipped gracefully, so
       opening an older save in a newer build (or vice-versa) will not crash.
-    * Spreadsheet rows are stored together with their column headers and are
-      re-aligned by header name on load, so adding, removing or reordering input
-      columns in future versions will not corrupt previously saved data.
+        * Scenario rows are stored as independent dictionaries, so adding/removing
+            optional input fields in future versions will not corrupt older save files.
 
 Note on coupling:
     This module intentionally avoids importing anything from ``main.py`` (that
@@ -52,11 +51,10 @@ import numpy as np
 from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
-    QTableWidgetItem,
 )
 
 FORMAT_ID = "lib_offgas_save"
-SAVE_VERSION = 1
+SAVE_VERSION = 2
 DEFAULT_EXTENSION = ".libsave"
 FILE_DIALOG_FILTER = "LIB Offgas Save (*.libsave);;JSON files (*.json);;All files (*.*)"
 FILE_OPEN_FILTER = "LIB Offgas Save (*.libsave *.json);;All files (*.*)"
@@ -123,142 +121,148 @@ def _json_default(o):
 
 
 # ---------------------------------------------------------------------------
-# LIBPage - spreadsheet tabs + per-tab calculation results
+# LIBPage - scenario tree + shared calculation results
 # ---------------------------------------------------------------------------
-def _collect_spreadsheet(spreadsheet):
-    """Capture the raw cell text of a ``SpreadsheetWidget`` (one sheet tab)."""
-    table = spreadsheet.table
-    rows = []
-    for row in range(table.rowCount()):
-        row_values = []
-        for col in range(table.columnCount()):
-            item = table.item(row, col)
-            row_values.append(item.text() if item is not None else "")
-        rows.append(row_values)
+def _resolve_tree_item_classes(scenario_tree_widget):
+    """Return (ProjectTreeItem, ScenarioTypeTreeItem, ScenarioTreeItem) classes.
 
-    return {
-        "headers": list(spreadsheet.headers),
-        "row_count": table.rowCount(),
-        "rows": rows,
-    }
+    Classes are resolved from the bound method globals to avoid importing
+    ``main.py`` and creating a circular dependency.
+    """
+    globals_map = getattr(getattr(scenario_tree_widget, "_add_project", None), "__globals__", {}) or {}
+    return (
+        globals_map.get("ProjectTreeItem"),
+        globals_map.get("ScenarioTypeTreeItem"),
+        globals_map.get("ScenarioTreeItem"),
+    )
 
 
-def _restore_spreadsheet(spreadsheet, sheet_payload):
-    """Replay saved cell text into a ``SpreadsheetWidget``, re-triggering the
-    same cell-changed parsing logic the user's own typing would trigger so the
-    structured ``scenario_data`` array is rebuilt correctly."""
-    table = spreadsheet.table
-    saved_headers = sheet_payload.get("headers", []) or []
-    rows = sheet_payload.get("rows", []) or []
-    row_count = sheet_payload.get("row_count", len(rows))
+def _collect_scenario_tree(scenario_tree_widget):
+    """Capture the full Project -> Type -> Scenario hierarchy."""
+    tree = getattr(scenario_tree_widget, "tree", None)
+    if tree is None:
+        return {"projects": []}
 
-    if row_count > table.rowCount():
-        table.setRowCount(row_count)
+    projects = []
+    root = tree.invisibleRootItem()
+    for i in range(root.childCount()):
+        project_item = root.child(i)
+        project_payload = {
+            "name": getattr(project_item, "project_name", project_item.text(0).strip()),
+            "expanded": bool(project_item.isExpanded()),
+            "types": [],
+        }
 
-    # Map saved column index -> current column index by header name, so
-    # reordered/added/removed columns in a newer build don't corrupt data.
-    col_map = {
-        saved_idx: spreadsheet.headers.index(header)
-        for saved_idx, header in enumerate(saved_headers)
-        if header in spreadsheet.headers
-    }
+        for j in range(project_item.childCount()):
+            type_item = project_item.child(j)
+            type_payload = {
+                "name": getattr(type_item, "type_name", type_item.text(0).strip()),
+                "expanded": bool(type_item.isExpanded()),
+                "scenarios": [],
+            }
 
-    table.blockSignals(True)
-    for row, row_values in enumerate(rows):
-        for saved_idx, text in enumerate(row_values):
-            if not text:
-                continue
-            target_col = col_map.get(saved_idx)
-            if target_col is None:
-                continue
-            item = table.item(row, target_col)
-            if item is None:
-                item = QTableWidgetItem()
-                table.setItem(row, target_col, item)
-            item.setText(text)
-    table.blockSignals(False)
+            for k in range(type_item.childCount()):
+                scenario_item = type_item.child(k)
+                type_payload["scenarios"].append(
+                    {
+                        "name": getattr(scenario_item, "scenario_name", scenario_item.text(0).strip()),
+                        "expanded": bool(scenario_item.isExpanded()),
+                        "data": _encode(getattr(scenario_item, "scenario_data", {}) or {}),
+                    }
+                )
 
-    # Re-run the parser (unblocked) for every cell we just populated so the
-    # underlying numpy scenario_data buffer is filled exactly as it would be
-    # from live user input.
-    for row, row_values in enumerate(rows):
-        for saved_idx, text in enumerate(row_values):
-            if not text:
-                continue
-            target_col = col_map.get(saved_idx)
-            if target_col is not None:
-                spreadsheet.on_cell_changed(row, target_col)
+            project_payload["types"].append(type_payload)
+
+        projects.append(project_payload)
+
+    return {"projects": projects}
+
+
+def _restore_scenario_tree(scenario_tree_widget, payload):
+    """Rebuild scenario tree hierarchy from payload."""
+    tree = getattr(scenario_tree_widget, "tree", None)
+    if tree is None:
+        return
+
+    projects = (payload or {}).get("projects", []) or []
+    if not projects:
+        return
+
+    project_cls, type_cls, scenario_cls = _resolve_tree_item_classes(scenario_tree_widget)
+    if project_cls is None or type_cls is None or scenario_cls is None:
+        raise RuntimeError("Scenario tree item classes are unavailable; cannot restore scenario hierarchy.")
+
+    tree.clear()
+    for project_payload in projects:
+        project_name = str(project_payload.get("name", "My Project") or "My Project")
+        project_item = project_cls(project_name)
+        tree.addTopLevelItem(project_item)
+
+        for type_payload in (project_payload.get("types", []) or []):
+            type_name = str(type_payload.get("name", "New Type") or "New Type")
+            type_item = type_cls(type_name)
+            project_item.addChild(type_item)
+
+            for scenario_payload in (type_payload.get("scenarios", []) or []):
+                scenario_name = str(scenario_payload.get("name", "New Scenario") or "New Scenario")
+                scenario_data = _decode(scenario_payload.get("data", {}) or {})
+                if not isinstance(scenario_data, dict):
+                    scenario_data = {}
+                scenario_item = scenario_cls(scenario_name, data=scenario_data)
+                type_item.addChild(scenario_item)
+                scenario_item.setExpanded(bool(scenario_payload.get("expanded", False)))
+
+            type_item.setExpanded(bool(type_payload.get("expanded", True)))
+
+        project_item.setExpanded(bool(project_payload.get("expanded", True)))
 
 
 def _collect_lib_page(lib_page):
-    sheets = []
-    for index in range(lib_page.tabs.count()):
-        spreadsheet = lib_page.tabs.widget(index)
-        if not hasattr(spreadsheet, "table") or not hasattr(spreadsheet, "headers"):
-            continue
-
-        sheet_payload = _collect_spreadsheet(spreadsheet)
-        sheet_payload["name"] = lib_page.tabs.tabText(index)
-
-        store = lib_page._result_store_for_sheet(spreadsheet)
-        sheet_payload["results"] = {
-            "tox": _encode(store.get("tox", {}) or {}),
-            "flam": _encode(store.get("flam", {}) or {}),
-        }
-        sheets.append(sheet_payload)
+    base_window = getattr(lib_page, "base_window", None)
+    active_result_type = None
+    if isinstance(getattr(base_window, "flam_scenario_results", None), dict) and base_window.flam_scenario_results:
+        active_result_type = "flam"
+    elif isinstance(getattr(base_window, "tox_scenario_results", None), dict) and base_window.tox_scenario_results:
+        active_result_type = "tox"
 
     return {
-        "sheets": sheets,
-        "active_sheet_index": lib_page.tabs.currentIndex(),
-        "sheet_counter": getattr(lib_page, "sheet_counter", len(sheets)),
+        "scenario_tree": _collect_scenario_tree(getattr(lib_page, "scenario_tree", None)),
+        "results": {
+            "tox_scenario_results": _encode(getattr(base_window, "tox_scenario_results", {}) or {}),
+            "flam_scenario_results": _encode(getattr(base_window, "flam_scenario_results", {}) or {}),
+            "active_result_type": active_result_type,
+            "active_results_tab_index": getattr(getattr(lib_page, "results_tabs", None), "currentIndex", lambda: 0)(),
+        },
     }
 
 
 def _restore_lib_page(lib_page, payload):
-    sheets = payload.get("sheets", []) or []
-    tabs = lib_page.tabs
+    scenario_tree_payload = (payload or {}).get("scenario_tree", {}) or {}
+    _restore_scenario_tree(getattr(lib_page, "scenario_tree", None), scenario_tree_payload)
 
-    if sheets:
-        # Trim down to a single sheet, then add new sheets as needed so the
-        # number of tabs matches the save file exactly.
-        while tabs.count() > 1:
-            lib_page.close_tab(0)
-
-        for index, sheet_payload in enumerate(sheets):
-            if index == 0:
-                spreadsheet = tabs.widget(0)
-            else:
-                lib_page.add_sheet()
-                spreadsheet = tabs.widget(tabs.count() - 1)
-
-            tabs.setTabText(index, sheet_payload.get("name", tabs.tabText(index)))
-            _restore_spreadsheet(spreadsheet, sheet_payload)
-
-            results_payload = sheet_payload.get("results", {}) or {}
-            store = lib_page._result_store_for_sheet(spreadsheet)
-            store["tox"] = _decode(results_payload.get("tox", {}) or {})
-            store["flam"] = _decode(results_payload.get("flam", {}) or {})
-
-        active_index = payload.get("active_sheet_index", 0)
-        if 0 <= active_index < tabs.count():
-            tabs.setCurrentIndex(active_index)
-        lib_page._sync_base_results_to_active_sheet()
-        lib_page.sheet_counter = payload.get("sheet_counter", tabs.count())
-
-    # Sync the toolbar option widgets to whatever was restored onto the base
-    # window (options are restored onto base_window before this is called).
     base_window = getattr(lib_page, "base_window", None)
+    results_payload = (payload or {}).get("results", {}) or {}
     if base_window is not None:
-        if hasattr(lib_page, "calc_function"):
-            selected_method = getattr(base_window, "selected_calc_method", None)
-            if selected_method:
-                found_index = lib_page.calc_function.findText(selected_method)
-                if found_index >= 0:
-                    lib_page.calc_function.setCurrentIndex(found_index)
-        if hasattr(lib_page, "le_chatelier_check"):
-            lib_page.le_chatelier_check.setChecked(bool(getattr(base_window, "use_le_chatelier_lfl", False)))
-        if hasattr(lib_page, "temp_dependent_lfl"):
-            lib_page.temp_dependent_lfl.setChecked(bool(getattr(base_window, "use_temp_dependent_lfl", False)))
+        tox_results = _decode(results_payload.get("tox_scenario_results", {}))
+        if isinstance(tox_results, dict):
+            base_window.tox_scenario_results = tox_results
+
+        flam_results = _decode(results_payload.get("flam_scenario_results", {}))
+        if isinstance(flam_results, dict):
+            base_window.flam_scenario_results = flam_results
+
+    active_result_type = results_payload.get("active_result_type")
+    if not active_result_type:
+        if getattr(base_window, "flam_scenario_results", None):
+            active_result_type = "flam"
+        elif getattr(base_window, "tox_scenario_results", None):
+            active_result_type = "tox"
+
+    if active_result_type in {"flam", "tox"} and hasattr(lib_page, "_update_results_display"):
+        lib_page._update_results_display(active_result_type)
+        desired_index = int(results_payload.get("active_results_tab_index", 0) or 0)
+        if hasattr(lib_page, "results_tabs") and 0 <= desired_index < lib_page.results_tabs.count():
+            lib_page.results_tabs.setCurrentIndex(desired_index)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +420,8 @@ def collect_program_state(base_window):
             "selected_target_flam_gas": getattr(base_window, "selected_target_flam_gas", None),
         },
         "gas_flowrate_data": _encode(getattr(base_window, "gas_flowrate_data", None)),
+        "custom_lib_definitions": _encode(getattr(base_window, "custom_lib_definitions", {}) or {}),
+        "custom_composition_definitions": _encode(getattr(base_window, "custom_composition_definitions", {}) or {}),
     }
 
     lib_page = pages.get("LIBPage")
@@ -454,10 +460,19 @@ def restore_program_state(base_window, payload):
             setattr(base_window, attr, options[attr])
 
     base_window.gas_flowrate_data = _decode(payload.get("gas_flowrate_data"))
+    restored_custom_libs = _decode(payload.get("custom_lib_definitions", {}))
+    if isinstance(restored_custom_libs, dict):
+        base_window.custom_lib_definitions = restored_custom_libs
+
+    restored_compositions = _decode(payload.get("custom_composition_definitions", {}))
+    if isinstance(restored_compositions, dict):
+        base_window.custom_composition_definitions = restored_compositions
 
     lib_page = pages.get("LIBPage")
     if lib_page is not None and "lib_page" in payload:
         _restore_lib_page(lib_page, payload["lib_page"])
+    if lib_page is not None and hasattr(lib_page, "sync_custom_lib_registry"):
+        lib_page.sync_custom_lib_registry()
 
     sprinkler_page = pages.get("SprinklerPage")
     if sprinkler_page is not None and "sprinkler_page" in payload:
