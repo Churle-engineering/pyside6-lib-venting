@@ -4,7 +4,7 @@ TARGET_FLAM_GAS = ["CO", "H2", "Total Hydrocarbons"]
 LIB_TYPE = ["NMC", "LFP", "LCO"]
 REQ_LIB_INFO = ["Manufacturer name","Battery room","LFL (%)","Cell Duration (s)","Module Duration (s)","Venting Temperature (°C)","Cell Amp Hr (Ah)","Module Amp Hr (Ah)","Module Capacity (kWh)","Cell Volume (L)","Module Volume (L)","Battery Charge (%)","CO (%)","CO2 (%)","H2 (%)","Total Hydrocarbons (%)"]
 USER_INPUTS = ["Scenario Description", "Room Area (m2)","Room Height (m)","Equipment Space (%)","Ventilation Rate (L/s/m2)","Module Propagation Delay (s)","Cells per","Modules per","Units","Calculation Duration (s)","LIB Type","Vent Switch Conc (%)","Emergency Vent Rate (L/s/m2)"]
-CALCULATION_METHODS = ["Cell Volume UL9540A", "Module Volume UL9540A", "Module Capacity", "Module Variable Flowrate"]
+CALCULATION_METHODS = ["Cell Volume UL9540A", "Module Volume UL9540A", "Module Capacity", "Module Variable Flowrate", "Cell Propagation"]
 UL_TEST_GASSES = ["CO","CO2","H2","Total Hydrocarbons"]
 # COMBINED_INPUTS = USER_INPUTS + REQ_LIB_INFO
 
@@ -30,6 +30,11 @@ INPUT_SCHEMA = {
     'venting_temperature':  ("Venting Temperature (°C)",     float, 0),
     "mod_prop_delay":       ("Module Propagation Delay (s)", float, 180),
     "mod_capacity":         ("module_capacity_(kwh)",        float, 0),
+    "cell_prop_delay":      ("Cell Propagation Delay (s)",  float, 60),
+    "cell_prop_cells":      ("No. Cells Propagating",       float, 2),
+    "cell_prop_mod_delay":  ("Cell Model Module Propagation Delay (s)", float, 300),
+    "cell_prop_modules":    ("No. Modules Propagating",     float, 2),
+    "cell_prop_start_mods": ("Initially Propagating Modules", float, 1),
     "battery_charge":       ("Battery Charge (%)",           float, 100),
     "vent_switch_conc":     ("Vent Switch Conc (%)",         float, 0),
     "emergency_vent_rate":  ("Emergency Vent Rate (L/s/m2)", float, 0),
@@ -71,6 +76,11 @@ TOOLTIPS = {
     "LIB Type": "Lithium-ion battery chemistry type",
     "Vent Switch Conc (%)": "Total gas concentration (%) at which ventilation switches to emergency rate. Set to 0 to disable.",
     "Emergency Vent Rate (L/s/m2)": "Ventilation rate to switch to when concentration threshold is reached. Set to 0 to disable."
+    ,"Cell Propagation Delay (s)": "Seconds between cell initiation waves inside each module (Cell Propagation method)."
+    ,"No. Cells Propagating": "Number of cells that initiate together in each cell wave (Cell Propagation method)."
+    ,"Cell Model Module Propagation Delay (s)": "Seconds between module initiation waves (Cell Propagation method)."
+    ,"No. Modules Propagating": "Number of additional modules that initiate together per module wave (Cell Propagation method)."
+    ,"Initially Propagating Modules": "Number of modules initiating at t=0 before staggered waves begin (Cell Propagation method)."
 }
 
 """
@@ -124,8 +134,8 @@ BATTERY_CHEMISTRY_DATA = {
         'reference': 'DNV.GL Technical Reference for Li-ion Battery Explosion Risk and Fire Suppression + additional data'
     },
     'LFP': {
-        'percent_tox': 34.6478,      # Percentage toxic gases (literature-based)
-        'percent_flam': 70.39466,     # Percentage flammable gases (literature-based)
+        'percent_tox': 34.6478,      # Percentage toxic gases (literature-based) 100-78 from supplementary material
+        'percent_flam': 70.39466,     # Percentage flammable gases (literature-based) 70.39466 from supp material it is 78
         'specific_capacity': 77.23544682,  # L/kWh - specific capacity for module calculations
         'tox_gas_composition': {
             'co': 38.1,               # Carbon monoxide
@@ -178,8 +188,12 @@ BATTERY_CHEMISTRY_DATA = {
         'reference': 'DNV.GL Technical Reference for Li-ion Battery Explosion Risk and Fire Suppression'
     }
 }
+#data taken from Peter's paper Figure 5. in L/KWh. Uses the median value from literature review data set.
+CELL_SPECIFIC_CAPACITY_DATA = {'prismatic': {'nmc': 585, 'lfp': 373, 'lco': 891},
+                         'cylindrical': {'nmc': 203, 'lfp': 168, 'lco': 305},
+                            'pouch': {'nmc': 530, 'lfp': 131, 'lco': 384}}
 
-
+AVERAGE_LFL = {"lfp": 5.5, "nmc": 8.5, "lco": 7.5}  # Average LFL values for different battery chemistries per figure 14, peter paper
 
 # ============================================================================
 # GAS LABELS AND SETS
@@ -222,28 +236,28 @@ COMPOSITION_METHODS = ["Literature Data", "UL9540A Flam Data", "User Defined"]
 # lfl: Lower Flammable Limit (%). None if N/A / not flammable.
 # molecular_weight: g/mol. None if N/A.
 CHEMICAL_PROPERTIES = {
-    'benzene': {'density': 3.313, 'erpg_3': 3.313, 'lfl': 1.4, 'molecular_weight': 78.11, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'toluene': {'density': 3.755, 'erpg_3': 3.755, 'lfl': 1.3, 'molecular_weight': 92.13842, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'co': {'density': 0.967, 'erpg_3': 0.484, 'lfl': 12.5, 'molecular_weight': 28.0101, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'co2': {'density': 1.830, 'erpg_3': 0.000, 'lfl': None, 'molecular_weight': 44.0095, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'no2': {'density': 1.890, 'erpg_3': 0.057, 'lfl': None, 'molecular_weight': 46.01, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'hcl': {'density': 1.517, 'erpg_3': 0.227, 'lfl': None, 'molecular_weight': 36.46, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'hf': {'density': 0.825, 'erpg_3': 0.041, 'lfl': None, 'molecular_weight': 20.01, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'hcn': {'density': 1.078, 'erpg_3': 0.027, 'lfl': 5.6, 'molecular_weight': 27.0253, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'so2': {'molecular_weight': 64.07, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'c2h5f': {'density': 2.14, 'erpg_3': 260000, 'lfl': 2.6, 'molecular_weight': 48.0601, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'methanol': {'density': 1.11, 'erpg_3': 145000, 'lfl': 6, 'molecular_weight': 32.042, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'emc': {'molecular_weight': 88.06, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'dmc': {'density': 3.1, 'erpg_3': 140, 'lfl': 4.2, 'molecular_weight': 90.08, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'dec': {'density': 4.1, 'erpg_3': 21, 'lfl': 4.2, 'molecular_weight': 118.13, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'propane': {'density': 0.86, 'erpg_3': 180000, 'lfl': 2.1, 'molecular_weight': 44.10, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'xylene': {'density': 3.7, 'erpg_3': 2500, 'lfl': 1.7, 'molecular_weight': 106.17, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'h2': {'density': 0.084, 'erpg_3': None, 'lfl': 4.0, 'molecular_weight': 2.01588, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'h2o': {'density': 996.86, 'erpg_3': None, 'lfl': None, 'molecular_weight': 18.015, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'pf3': {'density': 3.907, 'erpg_3': 10, 'lfl': None, 'molecular_weight': 87.97, 'toxicity_factor': 1.0, 'flammability_factor': 0},
-    'methane': {'density': 0.664, 'erpg_3': None, 'lfl': 4.4, 'molecular_weight': 16.04, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'total_hydrocarbons': {'density': 3.708, 'erpg_3': 0.000, 'lfl': 6.5, 'molecular_weight': None, 'toxicity_factor': 1.0, 'flammability_factor': 1},
-    'ethanol': {'density': 0.668, 'erpg_3': None, 'lfl': 5.0, 'molecular_weight': 46.08, 'toxicity_factor': 1.0, 'flammability_factor': 1}
+    'benzene': {'density': 3.313, 'erpg_3': 3.313, 'lfl': 1.4, 'molecular_weight': 78.11, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'toluene': {'density': 3.755, 'erpg_3': 3.755, 'lfl': 1.3, 'molecular_weight': 92.13842, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'co': {'density': 0.967, 'erpg_3': 0.484, 'lfl': 12.5, 'molecular_weight': 28.0101, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'co2': {'density': 1.830, 'erpg_3': 0.000, 'lfl': None, 'molecular_weight': 44.0095, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'no2': {'density': 1.890, 'erpg_3': 0.057, 'lfl': None, 'molecular_weight': 46.01, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'hcl': {'density': 1.517, 'erpg_3': 0.227, 'lfl': None, 'molecular_weight': 36.46, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'hf': {'density': 0.825, 'erpg_3': 0.041, 'lfl': None, 'molecular_weight': 20.01, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'hcn': {'density': 1.078, 'erpg_3': 0.027, 'lfl': 5.6, 'molecular_weight': 27.0253, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'so2': {'molecular_weight': 64.07, 'erpg_3': 25, 'lfl': None, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'c2h5f': {'density': 2.14, 'erpg_3': 260000, 'lfl': 2.6, 'molecular_weight': 48.0601, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'methanol': {'density': 1.11, 'erpg_3': 145000, 'lfl': 6, 'molecular_weight': 32.042, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'emc': {'molecular_weight': 88.06, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'dmc': {'density': 3.1, 'erpg_3': 140, 'lfl': 4.2, 'molecular_weight': 90.08, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'dec': {'density': 4.1, 'erpg_3': 21, 'lfl': 4.2, 'molecular_weight': 118.13, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'propane': {'density': 0.86, 'erpg_3': 180000, 'lfl': 2.1, 'molecular_weight': 44.10, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'xylene': {'density': 3.7, 'erpg_3': 2500, 'lfl': 1.7, 'molecular_weight': 106.17, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'h2': {'density': 0.084, 'erpg_3': None, 'lfl': 4.0, 'molecular_weight': 2.01588, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'h2o': {'density': 996.86, 'erpg_3': None, 'lfl': None, 'molecular_weight': 18.015, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'pf3': {'density': 3.907, 'erpg_3': 10, 'lfl': None, 'molecular_weight': 87.97, 'toxicity_factor': 1, 'flammability_factor': 0},
+    'methane': {'density': 0.664, 'erpg_3': None, 'lfl': 4.4, 'molecular_weight': 16.04, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'total_hydrocarbons': {'density': 3.708, 'erpg_3': 0.000, 'lfl': 6.5, 'molecular_weight': None, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'ethanol': {'density': 0.668, 'erpg_3': None, 'lfl': 5.0, 'molecular_weight': 46.08, 'toxicity_factor': 1, 'flammability_factor': 1}
 }
 
 

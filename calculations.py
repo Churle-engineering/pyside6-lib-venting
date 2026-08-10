@@ -20,7 +20,8 @@ from information import (
     THC_TEMPERATURE_LFL_PARAMETER_B,
 )
 
-
+# Helper utilities that normalise gas labels and convert scenario rows into a
+# consistent shape before the main simulation routines run.
 def strip_unit_suffix(name):
     """Remove unit suffixes such as _(%), _(s), _(ah), etc."""
     return re.sub(r"_\([^)]*\)$", "", name)
@@ -222,6 +223,8 @@ def _iter_scenarios(state, scenario_data=None):
     return []
 
 
+# Lightweight dataclass that stores the parsed scenario inputs using named
+# attributes instead of string-based dictionary lookups.
 @dataclass(slots=True)
 class ScenarioInputs:
     """Typed, attribute-accessed view of one parsed scenario row.
@@ -290,6 +293,8 @@ class ScenarioInputs:
         )
 
 
+# Convert a scenario row from the UI or spreadsheet into the shared numeric
+# input object used by all of the calculation routines.
 def _parse_scenario_inputs(data, propagation_delay_default=0.0):
     """Convert one spreadsheet row into the shared calculation input shape."""
     def number(column, *aliases, default=0.0):
@@ -328,6 +333,8 @@ def _parse_scenario_inputs(data, propagation_delay_default=0.0):
     )
 
 
+# Build the time-varying list of active modules so the release profile can be
+# staggered across the simulation period.
 def calc_active_modules_array(time_array, total_mods, propagation_delay, mod_duration, modules_per_delay=MODULES_PER_DELAY):
     """Vectorized module activity profile for the simulation."""
     active = np.zeros(len(time_array), dtype=np.float64)
@@ -353,6 +360,7 @@ def calc_active_modules_array(time_array, total_mods, propagation_delay, mod_dur
     return active
 
 
+# Choose which release calculation pathway should be used for the scenario.
 def determine_calc_method(mod_capacity, user_selected_method):
     if user_selected_method == "Module Variable Flowrate":
         return "Module Variable Flowrate", False
@@ -364,6 +372,7 @@ def determine_calc_method(mod_capacity, user_selected_method):
     return user_selected_method, False
 
 
+# Convert the selected calculation method into a module release volume in cubic metres.
 def calc_module_volume(calc_method, lib_type, mod_capacity, cells, cell_volume, module_volume=0.0):
     if calc_method == "Module Volume UL9540A":
         return module_volume / 1000.0
@@ -371,6 +380,54 @@ def calc_module_volume(calc_method, lib_type, mod_capacity, cells, cell_volume, 
         specific_capacity = get_specific_capacity(lib_type)
         return (specific_capacity * mod_capacity) / 1000.0
     return cells * cell_volume / 1000.0
+
+
+# Resolve the release volume and duration for the chosen method so the engine
+# can keep a consistent interface regardless of the input source.
+def resolve_release_parameters_for_calc_method(calc_method, inputs):
+    """Resolve per-module release volume and release duration used by calculations.
+
+    Returns a dict with explicit source metadata so each method's inputs are clear.
+    """
+    if calc_method == "Module Variable Flowrate":
+        return {
+            "route": "graphical_flowrate",
+            "total_release_volume_m3": None,
+            "release_duration_s": None,
+            "volume_source": "flowrate dataset (_lib_flowrate_data)",
+            "duration_source": "flowrate profile length",
+            "specific_capacity_ah_per_kwh": None,
+        }
+
+    if calc_method == "Module Volume UL9540A":
+        return {
+            "route": "scalar_release",
+            "total_release_volume_m3": inputs.module_volume / 1000.0,
+            "release_duration_s": inputs.module_duration,
+            "volume_source": "module_volume_(l)",
+            "duration_source": "module_duration_(s)",
+            "specific_capacity_ah_per_kwh": None,
+        }
+
+    if calc_method == "Module Capacity":
+        specific_capacity = get_specific_capacity(inputs.lib_type)
+        return {
+            "route": "scalar_release",
+            "total_release_volume_m3": (specific_capacity * inputs.module_capacity) / 1000.0,
+            "release_duration_s": inputs.module_duration,
+            "volume_source": "specific_capacity(lib_type) * module_capacity_(kwh)",
+            "duration_source": "module_duration_(s)",
+            "specific_capacity_ah_per_kwh": specific_capacity,
+        }
+
+    return {
+        "route": "scalar_release",
+        "total_release_volume_m3": (inputs.cells * inputs.cell_volume) / 1000.0,
+        "release_duration_s": inputs.cell_duration,
+        "volume_source": "cells_per_module * cell_volume_(l)",
+        "duration_source": "cell_duration_(s)",
+        "specific_capacity_ah_per_kwh": None,
+    }
 
 
 def validate_densities(gas_labels, gas_percents, gas_data, normalize_fn=None):
@@ -433,6 +490,8 @@ def resolve_toxic_trigger_gas(valid_gas_labels):
     return None, None, None
 
 
+# Create the emergency ventilation controller state used by both toxicity and
+# flammability calculations when a trigger concentration is exceeded.
 def init_emergency_ventilation(ventilation_rate, emergency_vent_rate, room_area, room_vol, vent_switch_conc, trigger_threshold=None):
     """Create shared emergency-ventilation controller state for toxicity and flammability calcs.
 
@@ -524,6 +583,8 @@ def _search_modules_required_for_threshold(peak_fn, threshold_value, max_modules
     return result
 
 
+# Determine the number of modules required to reach a threshold using a
+# constant-per-module release profile and a simple room mixing model.
 def modules_required_constant_flow(
     total_duration,
     time_step,
@@ -579,6 +640,8 @@ def modules_required_constant_flow(
     )
 
 
+# Determine the number of modules required to reach a threshold using a
+# time-varying flowrate profile imported from the custom LIB data.
 def modules_required_flow_profile(
     total_duration,
     time_step,
@@ -660,6 +723,8 @@ def max_modules_before_threshold(modules_required, max_modules_limit=100000):
 # --- Calculations ---
 
 
+# Run the toxicity assessment across the selected scenarios and store the
+# resulting concentration DataFrames for later display.
 def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_data, scenario_data=None, clear_existing=True):
     tox_scenario_results = getattr(state, "tox_scenario_results", None)
     if tox_scenario_results is None:
@@ -682,11 +747,6 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
             room_height = inputs.room_height
             room_area = inputs.room_area
             equip_space = inputs.equip_space
-            vol_battery = inputs.cell_volume
-            cell_duration = inputs.cell_duration
-            module_volume = inputs.module_volume
-            module_duration = inputs.module_duration
-            cells = inputs.cells
             modules = inputs.modules
             units = inputs.units
             lib_type = inputs.lib_type
@@ -695,29 +755,50 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
             vent_switch_conc = inputs.vent_switch_conc
             emergency_vent_rate = inputs.emergency_vent_rate
 
-            user_selected_method = str(
-                data.get(
-                    "Calculation Method",
-                    _resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A"),
+            user_selected_method = str(data.get("Calculation Method",_resolve_state_value(state, "selected_calc_method", "Cell Volume UL9540A"),) or "Cell Volume UL9540A")
+            if user_selected_method == "Module Variable Flowrate":
+                # Toxicity does not support the graphical flowrate route.
+                # Fall back to module-level scalar toxicity calculations.
+                print(
+                    f"Toxicity - Scenario '{scenario_name}' selected Module Variable Flowrate; "
+                    "defaulting to Module Volume UL9540A for toxicity."
                 )
-                or "Cell Volume UL9540A"
-            )
+                user_selected_method = "Module Volume UL9540A"
             calc_method, _ = determine_calc_method(mod_capacity, user_selected_method)
             print(f"Toxicity - Using calculation method: {calc_method}")
 
-            mod_vol = calc_module_volume(calc_method, lib_type, mod_capacity, cells, vol_battery, module_volume)
-            if calc_method == "Module Volume UL9540A":
-                if room_height == 0 or room_area == 0 or module_duration == 0:
-                    raise ValueError("Module Volume UL9540A requires room dimensions and module duration")
-                if module_volume == 0:
-                    raise ValueError("Module volume is zero")
-            else:
-                if room_height == 0 or room_area == 0 or cell_duration == 0:
-                    raise ValueError("Cell-based methods require room dimensions and cell duration")
-                if calc_method == "Module Capacity" and mod_capacity == 0:
-                    raise ValueError("Module capacity is zero")
-                if calc_method != "Module Capacity" and vol_battery == 0:
-                    raise ValueError("Cell volume is zero")
+            release_params = resolve_release_parameters_for_calc_method(calc_method, inputs)
+            if release_params["route"] == "graphical_flowrate":
+                raise ValueError(
+                    "Module Variable Flowrate is not supported for toxicity calculations. "
+                    "Use Module Volume UL9540A, Module Capacity, Cell Volume UL9540A, or Cell Propagation."
+                )
+
+            if room_height == 0 or room_area == 0:
+                raise ValueError("Room Height (m) and Room Area (m2) are required")
+
+            if release_params["release_duration_s"] is None or release_params["release_duration_s"] <= 0:
+                raise ValueError(
+                    f"{calc_method} requires positive release duration from {release_params['duration_source']}"
+                )
+            if release_params["total_release_volume_m3"] is None or release_params["total_release_volume_m3"] <= 0:
+                raise ValueError(
+                    f"{calc_method} requires positive total release volume from {release_params['volume_source']}"
+                )
+
+            mod_vol = float(release_params["total_release_volume_m3"])
+            mod_duration = float(release_params["release_duration_s"])
+            print(
+                "Toxicity - Release source: "
+                f"volume={mod_vol:.8f} m3 ({release_params['volume_source']}), "
+                f"duration={mod_duration:.4f} s ({release_params['duration_source']})"
+            )
+            if release_params["specific_capacity_ah_per_kwh"] is not None:
+                print(
+                    "Toxicity - Module Capacity conversion: "
+                    f"specific_capacity={release_params['specific_capacity_ah_per_kwh']:.6f} Ah/kWh, "
+                    f"module_capacity={inputs.module_capacity:.6f} kWh"
+                )
 
             lib_type_upper = str(lib_type).upper()
             chemistry_data = BATTERY_CHEMISTRY_DATA.get(lib_type_upper, BATTERY_CHEMISTRY_DATA.get("NMC", {}))
@@ -744,16 +825,8 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
 
             adj_ventilation_rate = (ventilation_rate / 1000.0) * room_area
 
-            if calc_method == "Module Volume UL9540A":
-                battery_duration = module_duration
-            else:
-                battery_duration = cell_duration
-            if battery_duration <= 0:
-                battery_duration = 1
-
             room_vol = room_height * room_area * (1 - (equip_space / 100.0))
             total_mods = modules * units
-            mod_duration = battery_duration
 
             if "_percent_tox_override" in data:
                 percent_tox = float(data["_percent_tox_override"])
@@ -852,6 +925,8 @@ def toxicity_assessment_calc(parent, state, display_toxicity_result_popup, gas_d
         display_toxicity_result_popup(tox_scenario_results, None, [], gas_data)
 
 
+# Run the main flammability assessment using the selected release method and
+# build DataFrames of vapour concentration versus time.
 def flammability_assessment_calc(parent, state, display_flammability_result_popup, gas_data, bat_data, flam_gasses_labels, scenario_data=None, clear_existing=True):
     print("\n=== DEBUG: flammability_assessment_calc START ===")
     print(f"DEBUG: clear_existing={clear_existing}, scenario_data_type={type(scenario_data).__name__ if scenario_data is not None else 'None'}")
@@ -1010,6 +1085,13 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
             gases = np.zeros(num_gases, dtype=float)
             prev_gas = np.zeros(num_gases, dtype=float)
 
+            # CO2 is inert (not summed into flammable gas totals) but dilutes the mixture,
+            # so its own concentration trace is tracked for the Le Chatelier LFL correction.
+            k_co2 = 1.5
+            co2_conc_arr = np.zeros(num_steps, dtype=float)
+            co2_gas = 0.0
+            co2_prev = 0.0
+
             emergency_vent_state = init_emergency_ventilation(
                 inputs.ventilation_rate, inputs.emergency_vent_rate,
                 inputs.room_area, room_vol, inputs.vent_switch_conc,
@@ -1039,6 +1121,12 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
                 current_conc = (gases / room_vol) * 100.0 if room_vol > 0 else np.zeros_like(gases)
                 vv_concentrations[:, step_idx] = current_conc
                 mgl_concentrations[:, step_idx] = (current_conc / 100.0) * densities * 1000.0
+
+                co2_inflow = active_modules_arr[step_idx] * mod_flowrate * inputs.co2_percent
+                co2_outflow = total_vent_outflow * co2_prev
+                co2_gas = max(co2_gas + (co2_inflow - co2_outflow) * inputs.time_step, 0.0)
+                co2_prev = co2_gas
+                co2_conc_arr[step_idx] = (co2_gas / room_vol) * 100.0 if room_vol > 0 else 0.0
 
                 total_vv_now = float(np.sum(current_conc))
                 total_gas_volume_now = float(np.sum(gases))
@@ -1127,7 +1215,17 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
                         denominator = inv_lfls @ fracs
                         valid_denom = denominator > 0
                         active_indices = np.where(active_mask)[0]
-                        adjusted_le_chatelier_lfl[active_indices[valid_denom]] = 1.0 / denominator[valid_denom]
+                        valid_indices = active_indices[valid_denom]
+                        lfl_mix = 1.0 / denominator[valid_denom]
+
+                        # Dilute the mixture LFL when CO2 is present alongside the flammable gases.
+                        total_offgas = total_flam_conc[valid_indices] + co2_conc_arr[valid_indices]
+                        co2_frac = np.where(total_offgas > 0, co2_conc_arr[valid_indices] / total_offgas, 0.0)
+                        needs_correction = (co2_frac > 0) & (co2_frac < 1.0)
+                        inert_ratio = np.where(needs_correction, co2_frac / (1.0 - co2_frac), 0.0)
+                        adjusted_lfl = lfl_mix * (100.0 - lfl_mix - (1.0 - k_co2) * inert_ratio * lfl_mix) / (100.0 - lfl_mix)
+                        adjusted_lfl = np.where(needs_correction, adjusted_lfl, lfl_mix)
+                        adjusted_le_chatelier_lfl[valid_indices] = adjusted_lfl
                     lfl_curve_label = "Temperature-adjusted Le Chatelier LFL" if use_temp_dependent_lfl else "Le Chatelier LFL"
                     print(f"DEBUG: le_chatelier_names={names}")
                     print(f"DEBUG: le_chatelier_used_lfls={np.array2string(used_lfls, precision=8)}")
@@ -1199,6 +1297,8 @@ def flammability_assessment_calc(parent, state, display_flammability_result_popu
     display_flammability_result_popup(flam_scenario_results, None, gas_data, bat_data, parent=parent)
 
 
+# Run the graphical flowrate-based flammability model for LIB datasets that
+# provide a time-series release profile rather than a single scalar release.
 def flammability_assessment_calc_graphical_method(parent, state, display_flammability_result_popup, gas_data, bat_data, flam_gasses_labels, scenario_data=None, clear_existing=True):
     """Fallback implementation for the graphical flowrate method."""
     """

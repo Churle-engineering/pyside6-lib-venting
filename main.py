@@ -23,6 +23,7 @@ from calculations import (
     flammability_assessment_calc,
     flammability_assessment_calc_graphical_method,
 )
+from calculations_cell import cell_venting_assessment_calc
 from sprinkler import activation_time_Calc
 
 
@@ -48,8 +49,8 @@ from sprinkler import activation_time_Calc
 # ---------------------------------------------------------------------------
 _current_theme = "Warm Slate"  # Default theme applied at startup
 
-# helper functions
-
+# Helper functions for shared UI behaviour such as theme switching and simple
+# window actions used by multiple pages.
 def apply_theme(theme_name: str) -> None:
     """Apply a named theme to the whole application by setting the QSS."""
     global _current_theme
@@ -120,6 +121,8 @@ except Exception:
     pass
 
 
+# Main application window that hosts the page stack and shared state for the
+# different calculation modules.
 class BaseWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -214,6 +217,7 @@ class BaseWindow(QMainWindow):
             _action.triggered.connect(lambda checked=False, t=_theme_name: apply_theme(t))
         
         
+# Landing page that presents the main tools available in the application.
 class IntroPage(QWidget):
     def __init__(self, base_window):
         super().__init__()
@@ -276,6 +280,7 @@ class IntroPage(QWidget):
         layout.addStretch()
 
 
+# Dialog for creating or editing a custom LIB definition and optional flowrate data.
 class LIBDefinitionDialog(QDialog):
     """Dialog for creating a custom LIB type from required LIB input fields."""
 
@@ -391,6 +396,7 @@ class LIBDefinitionDialog(QDialog):
 # Composition definition dialog
 # ---------------------------------------------------------------------------
 
+# Dialog for saving a named gas composition made from the tracked chemicals.
 class CompositionDefinitionDialog(QDialog):
     """Dialog for defining a named gas composition from all tracked chemicals."""
 
@@ -453,8 +459,11 @@ class CompositionDefinitionDialog(QDialog):
 # Scenario input dialog
 # ---------------------------------------------------------------------------
 
+# Tabbed dialog for editing the full set of inputs for a single scenario.
 class ScenarioInputDialog(QDialog):
     """Tabbed form for editing all inputs of a single scenario."""
+
+    CELL_PROPAGATION_METHOD = "Cell Propagation"
 
     _DISPLAY_NAMES = {
         "cell_volume_(l)":       "Cell Volume (L)",
@@ -486,9 +495,14 @@ class ScenarioInputDialog(QDialog):
         "Battery Room":          "Name or ID of the battery room",
         "Scenario Description":    "Short description of the scenario for identification",
         "Composition Method":       "Method used to determine the gas composition for this scenario",
+        "Cell Propagation Delay (s)": "Seconds between cell initiation waves inside a module.",
+        "No. Cells Propagating": "Number of cells that initiate together for each cell propagation wave.",
+        "Cell Model Module Propagation Delay (s)": "Seconds between module initiation waves for the cell propagation model.",
+        "No. Modules Propagating": "Number of additional modules that initiate together in each module wave.",
+        "Initially Propagating Modules": "Number of modules already initiating at t=0 for the cell propagation model.",
     }
 
-    _TAB_FIELDS = [
+    _BASE_TAB_FIELDS = [
         ("Scenario Info", [
             "Scenario Description",
             "Battery Room",
@@ -514,12 +528,28 @@ class ScenarioInputDialog(QDialog):
         ]),
     ]
 
+    _CELL_PROPAGATION_TAB = (
+        "Cell Propagation",
+        [
+            "Cell Propagation Delay (s)",
+            "No. Cells Propagating",
+            "Cell Model Module Propagation Delay (s)",
+            "No. Modules Propagating",
+            "Initially Propagating Modules",
+        ],
+    )
+
     _DEFAULTS = {
         "Module Propagation Delay (s)": "180",
         "Battery Charge (%)":           "100",
         "Calculation Duration (s)":     "3600",
         "Calculation Method":           CALCULATION_METHODS[0],
         "Composition Method":           COMPOSITION_METHODS[0],
+        "Cell Propagation Delay (s)": "60",
+        "No. Cells Propagating": "2",
+        "Cell Model Module Propagation Delay (s)": "300",
+        "No. Modules Propagating": "2",
+        "Initially Propagating Modules": "1",
     }
 
     def __init__(self, scenario_name: str = "New Scenario", data: dict = None, lib_types=None, lib_definitions=None, composition_options=None, composition_definitions=None, parent=None):
@@ -535,8 +565,10 @@ class ScenarioInputDialog(QDialog):
         self._composition_definitions = dict(composition_definitions) if composition_definitions else {}
 
         tabs = QTabWidget()
+        self._tabs = tabs
+        self._tab_widgets: dict = {}
 
-        for tab_title, fields in self._TAB_FIELDS:
+        for tab_title, fields in self._BASE_TAB_FIELDS:
             tab_w = QWidget()
             form = QFormLayout(tab_w)
             form.setHorizontalSpacing(16)
@@ -600,6 +632,40 @@ class ScenarioInputDialog(QDialog):
                     self._form_labels[field] = label_item.widget()
 
             tabs.addTab(tab_w, tab_title)
+            self._tab_widgets[tab_title] = tab_w
+
+        cell_prop_tab_title, cell_prop_fields = self._CELL_PROPAGATION_TAB
+        cell_prop_tab = QWidget()
+        cell_prop_form = QFormLayout(cell_prop_tab)
+        cell_prop_form.setHorizontalSpacing(16)
+        cell_prop_form.setVerticalSpacing(9)
+        cell_prop_form.setContentsMargins(14, 12, 14, 12)
+
+        for field in cell_prop_fields:
+            display = self._DISPLAY_NAMES.get(field, field)
+            tooltip = (
+                self._EXTRA_TOOLTIPS.get(field)
+                or TOOLTIPS.get(field)
+                or TOOLTIPS.get(field.rstrip(")").rsplit(" (", 1)[0])
+                or ""
+            )
+
+            w = QLineEdit()
+            if not is_string_field(field):
+                w.setPlaceholderText("0.0")
+            if data is None and field in self._DEFAULTS:
+                w.setText(self._DEFAULTS[field])
+
+            if tooltip:
+                w.setToolTip(tooltip)
+            self._field_widgets[field] = w
+            cell_prop_form.addRow(display + ":", w)
+            row_num = cell_prop_form.rowCount() - 1
+            label_item = cell_prop_form.itemAt(row_num, QFormLayout.LabelRole)
+            if label_item and label_item.widget():
+                self._form_labels[field] = label_item.widget()
+
+        self._tab_widgets[cell_prop_tab_title] = cell_prop_tab
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -619,6 +685,27 @@ class ScenarioInputDialog(QDialog):
         self._update_composition_visibility(
             comp_method_w.currentText() if isinstance(comp_method_w, QComboBox) else ""
         )
+
+        calc_method_w = self._field_widgets.get("Calculation Method")
+        if isinstance(calc_method_w, QComboBox):
+            calc_method_w.currentTextChanged.connect(self._update_cell_propagation_tab_visibility)
+        self._update_cell_propagation_tab_visibility(
+            calc_method_w.currentText() if isinstance(calc_method_w, QComboBox) else ""
+        )
+
+    def _update_cell_propagation_tab_visibility(self, method_text: str = ""):
+        """Show Cell Propagation tab only when the calculation method is selected."""
+        tab_title, _fields = self._CELL_PROPAGATION_TAB
+        tab_widget = self._tab_widgets.get(tab_title)
+        if tab_widget is None:
+            return
+
+        should_show = (method_text == self.CELL_PROPAGATION_METHOD)
+        current_index = self._tabs.indexOf(tab_widget)
+        if should_show and current_index == -1:
+            self._tabs.addTab(tab_widget, tab_title)
+        elif not should_show and current_index != -1:
+            self._tabs.removeTab(current_index)
 
     def _update_composition_visibility(self, method_text: str = ""):
         """Show Gas Composition row only when Composition Method is 'User Defined'."""
@@ -685,6 +772,7 @@ class ScenarioInputDialog(QDialog):
 # Scenario tree — three-level hierarchy: Project → Type → Scenario
 # ---------------------------------------------------------------------------
 
+# Top-level tree node representing a project in the scenario hierarchy.
 class ProjectTreeItem(QTreeWidgetItem):
     """Top-level project node."""
 
@@ -701,6 +789,7 @@ class ProjectTreeItem(QTreeWidgetItem):
         self._refresh()
 
 
+# Mid-level tree node grouping scenarios by category or type.
 class ScenarioTypeTreeItem(QTreeWidgetItem):
     """Mid-level scenario-type / category node."""
 
@@ -717,6 +806,7 @@ class ScenarioTypeTreeItem(QTreeWidgetItem):
         self._refresh()
 
 
+# Leaf node holding one runnable scenario and its full input payload.
 class ScenarioTreeItem(QTreeWidgetItem):
     """Leaf node: one runnable scenario with its full input data dict."""
 
@@ -734,6 +824,7 @@ class ScenarioTreeItem(QTreeWidgetItem):
         self._refresh()
 
 
+# Left-hand tree widget used to organise projects, scenario types and scenarios.
 class ScenarioTreeWidget(QWidget):
     """Left-panel hierarchy tree: Project → Scenario Type → Scenario."""
 
@@ -1085,6 +1176,7 @@ class ScenarioTreeWidget(QWidget):
         return {}
 
 
+# Main calculation page for LIB toxicity and flammability assessments.
 class LIBPage(QWidget):
     _CUSTOM_LIB_SCENARIO_KEY_MAP = {
         "Manufacturer name": ["manufacturer_name", "Manufacturer Name"],
@@ -1278,6 +1370,17 @@ class LIBPage(QWidget):
         scenarios = self.scenario_tree.collect_selected_scenarios()
         merged = [self._apply_custom_lib_to_scenario(s) for s in scenarios]
         return [self._apply_composition_to_scenario(s) for s in merged]
+
+    def _classify_calculation_method(self, scenario, default_method):
+        """Classify a scenario calculation method for routing to the correct engine."""
+        raw_method = str((scenario or {}).get("Calculation Method", default_method) or default_method).strip()
+        normalized = " ".join(raw_method.split()).lower()
+
+        if normalized == "module variable flowrate":
+            return "flowrate"
+        if normalized == "cell propagation":
+            return "cell_propagation"
+        return "standard"
 
     def _apply_composition_to_scenario(self, scenario):
         """Apply gas composition based on the selected Composition Method."""
@@ -1789,22 +1892,47 @@ class LIBPage(QWidget):
             QMessageBox.warning(self, "Missing LIB", "The following scenarios have no LIB assigned:\n" + "\n".join(f"  • {n}" for n in missing) + "\n\nAssign a LIB via Edit Scenario before running calculations.")
             return
 
+        cell_prop_scenarios = []
+        standard_scenarios = []
+        default_method = CALCULATION_METHODS[0]
+        for scenario in scenario_data:
+            method_bucket = self._classify_calculation_method(scenario, default_method)
+            if method_bucket == "cell_propagation":
+                cell_prop_scenarios.append(scenario)
+            else:
+                standard_scenarios.append(scenario)
+
         temp_state = SimpleNamespace(
             tox_scenario_results={},
+            cell_scenario_results={},
             selected_calc_method=self.base_window.selected_calc_method,
             use_le_chatelier_lfl=self.base_window.use_le_chatelier_lfl,
             use_temp_dependent_lfl=self.base_window.use_temp_dependent_lfl,
         )
         _noop = lambda *a, **kw: None
-        toxicity_assessment_calc(
-            self.base_window,
-            state=temp_state,
-            display_toxicity_result_popup=_noop,
-            gas_data=CHEMICAL_PROPERTIES,
-            scenario_data=scenario_data,
-            clear_existing=True,
-        )
+
+        if standard_scenarios:
+            toxicity_assessment_calc(
+                self.base_window,
+                state=temp_state,
+                display_toxicity_result_popup=_noop,
+                gas_data=CHEMICAL_PROPERTIES,
+                scenario_data=standard_scenarios,
+                clear_existing=True,
+            )
+
+        if cell_prop_scenarios:
+            cell_venting_assessment_calc(
+                self.base_window,
+                state=temp_state,
+                gas_data=CHEMICAL_PROPERTIES,
+                scenario_data=cell_prop_scenarios,
+                clear_existing=False,
+            )
+
         for scenario_name, result_data in temp_state.tox_scenario_results.items():
+            self._add_result_tab("tox", scenario_name, result_data)
+        for scenario_name, result_data in temp_state.cell_scenario_results.items():
             self._add_result_tab("tox", scenario_name, result_data)
 
     def run_flam_calc(self):
@@ -1815,16 +1943,20 @@ class LIBPage(QWidget):
             return
         standard_scenarios = []
         flowrate_scenarios = []
+        cell_prop_scenarios = []
         default_method = CALCULATION_METHODS[0]
         for scenario in scenario_data:
-            selected_method = str(scenario.get("Calculation Method", default_method) or default_method)
-            if selected_method == "Module Variable Flowrate":
+            method_bucket = self._classify_calculation_method(scenario, default_method)
+            if method_bucket == "flowrate":
                 flowrate_scenarios.append(scenario)
+            elif method_bucket == "cell_propagation":
+                cell_prop_scenarios.append(scenario)
             else:
                 standard_scenarios.append(scenario)
 
         temp_state = SimpleNamespace(
             flam_scenario_results={},
+            cell_scenario_results={},
             selected_calc_method=self.base_window.selected_calc_method,
             use_le_chatelier_lfl=self.base_window.use_le_chatelier_lfl,
             use_temp_dependent_lfl=self.base_window.use_temp_dependent_lfl,
@@ -1855,7 +1987,19 @@ class LIBPage(QWidget):
                 scenario_data=flowrate_scenarios,
                 clear_existing=False,
             )
+
+        if cell_prop_scenarios:
+            cell_venting_assessment_calc(
+                self.base_window,
+                state=temp_state,
+                gas_data=CHEMICAL_PROPERTIES,
+                scenario_data=cell_prop_scenarios,
+                clear_existing=False,
+            )
+
         for scenario_name, result_data in temp_state.flam_scenario_results.items():
+            self._add_result_tab("flam", scenario_name, result_data)
+        for scenario_name, result_data in temp_state.cell_scenario_results.items():
             self._add_result_tab("flam", scenario_name, result_data)
 
     # ------------------------------------------------------------------
@@ -1889,6 +2033,7 @@ class LIBPage(QWidget):
         open_results_table_window(self.base_window, self.base_window)
 
 
+# Page for calculating sprinkler activation times from the supplied inputs.
 class SprinklerPage(QWidget):
     """UI page for sprinkler activation time calculations."""
     def __init__(self, base_window):
@@ -2103,6 +2248,7 @@ class SprinklerPage(QWidget):
         self.results_label.setText("Results will appear here after running the calculation.")
 
 
+# Tutorial page that explains how to use the modelling workflow.
 class TutorialPage(QWidget):
     def __init__(self, base_window):
         super().__init__()
@@ -2220,6 +2366,7 @@ class TutorialPage(QWidget):
         page_layout.addWidget(scroll)
 
 
+# Page for pool spill and fire duration calculations.
 class PoolSpillPage(QWidget):
     """Placeholder window for the Pool Spill & Fire Duration calculator."""
     def __init__(self, base_window):
@@ -2378,6 +2525,7 @@ class PoolSpillPage(QWidget):
         self.optional_group.setVisible(self.oi_tickbox.isChecked())
 
 
+# Placeholder page for receptor heat flux calculations.
 class ReceptorHeatFlux(QWidget):
     """Placeholder window for the Receptor Heat Flux calculator."""
     def __init__(self, base_window):
