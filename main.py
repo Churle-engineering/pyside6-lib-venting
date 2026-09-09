@@ -1,35 +1,24 @@
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGroupBox,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPushButton,
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabWidget, QToolBar,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-    QGridLayout)
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox, QGridLayout)
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QShortcut, QKeySequence
-from information import (FIRE_PROPERTIES, COMBINED_INPUTS, POOL_SPREAD_DATA,
-    REQ_LIB_INFO, TOOLTIPS, LIB_TYPE, CALCULATION_METHODS, _THEMES,
-    POOL_PROPERTIES, BATTERY_CHEMISTRY_DATA, CHEMICAL_PROPERTIES, FLAMMABLE_GASES,
-    LIB_TYPE_SPECIFIC_CAPACITY, GAS_LABEL_FIX, COMPOSITION_METHODS)
-from pdf import pdf_generation
-import numpy as np
+from PySide6.QtGui import QFont, QDoubleValidator, QKeySequence, QShortcut
+from information import (FIRE_PROPERTIES, POOL_SPREAD_DATA, LIB_TYPE, CELL_FORMAT, CALCULATION_METHODS, _THEMES,
+                         POOL_PROPERTIES, CHEMICAL_PROPERTIES, COMPOSITION_METHODS,
+                         FlowrateProfile, GasComposition, LIBInputs, LIBSpec,
+                         CALC_METHOD_MODULE_VARIABLE_FLOWRATE)
 import copy
-from types import SimpleNamespace
-from miscfunc import load_file, import_gas_flowrate_data, generate_input_template
-import display_popup as display_popup_module
-from resulttable import open_results_table_window
-from saveload import save_program_state, load_program_state
-from calculations import (
-    is_string_field,
-    toxicity_assessment_calc,
-    flammability_assessment_calc,
-    flammability_assessment_calc_graphical_method,
-)
-from calculations_cell import cell_venting_assessment_calc
+import os
+from dataclass_forms import build_tabbed_form, read_form
+from scenario_model import ScenarioStore
 from sprinkler import activation_time_Calc
+from saveload import save_program_state, load_program_state
+
 
 
 # to do's:
 # add a calculation method to the input of the pdf report.
-# the result table builder needs ppm and % of the toxixity threshold
 # make it so that 1 second timesteps are always used for the quick caluclations. Big time steps can mess it up
 # need to decouple timestep from number of printed sheets
 # make data tables optional for the pdf export
@@ -39,7 +28,6 @@ from sprinkler import activation_time_Calc
 # try to integrate a way to use the different calculation methods for different scenario rows as they may have different batteries that require different methods.
 # add a safety factor to the ventillation as some decimal which could account for reducing the perfect mixing.
 #add an option to toggle a 25% of LFL line to be put in the popup results plots.
-# add a way to add command + s shortcut to save current state.
 
 
 # ---------------------------------------------------------------------------
@@ -48,78 +36,6 @@ from sprinkler import activation_time_Calc
 # visually distinct regardless of the active colour scheme.
 # ---------------------------------------------------------------------------
 _current_theme = "Warm Slate"  # Default theme applied at startup
-
-# Helper functions for shared UI behaviour such as theme switching and simple
-# window actions used by multiple pages.
-def apply_theme(theme_name: str) -> None:
-    """Apply a named theme to the whole application by setting the QSS."""
-    global _current_theme
-    _current_theme = theme_name
-    app = QApplication.instance()
-    if app:
-        app.setStyleSheet(_THEMES.get(theme_name, ""))
-
-
-def _make_toolbar_separator() -> QFrame:
-    """Vertical line widget for visually separating toolbar groups."""
-    sep = QFrame()
-    sep.setFrameShape(QFrame.VLine)
-    sep.setFrameShadow(QFrame.Sunken)
-    sep.setFixedWidth(2)
-    sep.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-    return sep
-
-def return_to_intro_page(current_window):
-    current_window.close()
-    intro_page = IntroPage()
-    intro_page.show()
-    return intro_page  # Return the new window instance for further use if needed
-
-def save_file(self):
-    save_program_state(self)
-
-def open_file(self):
-    load_program_state(self)
-
-def ask_to_close(self):
-    reply = QMessageBox.question(self, 'Exit', 'Are you sure you want to exit?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-    if reply == QMessageBox.Yes:
-        self.close()
-
-
-def display_toxicity_result_popup(results, tree, gas_labels, gas_data):
-    if not results:
-        QMessageBox.information(None, "Toxicity Results", "No toxicity results were generated.")
-        return
-
-    scenario_names = ", ".join(results.keys())
-    QMessageBox.information(
-        None,
-        "Toxicity Results",
-        f"Toxicity assessment completed for {len(results)} scenario(s):\n\n{scenario_names}",
-    )
-
-
-def display_flammability_result_popup(results, tree, gas_data, bat_data, parent=None):
-    if not results:
-        QMessageBox.information(parent or None, "Flammability Results", "No flammability results were generated.")
-        return
-
-    scenario_names = ", ".join(results.keys())
-    QMessageBox.information(
-        parent or None,
-        "Flammability Results",
-        f"Flammability assessment completed for {len(results)} scenario(s):\n\n{scenario_names}",
-    )
-
-# Override the simple stubs with the richer PySide6 popup implementations
-try:
-    display_toxicity_result_popup = display_popup_module.display_toxicity_result_popup
-    display_flammability_result_popup = display_popup_module.display_flammability_result_popup
-except Exception:
-    # If import fails, keep the simple QMessageBox-based stubs above
-    pass
-
 
 # Main application window that hosts the page stack and shared state for the
 # different calculation modules.
@@ -133,22 +49,12 @@ class BaseWindow(QMainWindow):
         self.setCentralWidget(self.page_stack) #set as central widget of page
         self.page = {}  # store pages by name
         self.page_history = []  # store page history for back button functionality
-        self.tox_scenario_results = {}
-        self.flam_scenario_results = {}
-        self.selected_calc_method = CALCULATION_METHODS[0]
-        self.use_le_chatelier_lfl = False
-        self.use_temp_dependent_lfl = False
-        self.selected_target_flam_gas = "CO"
-        self.gas_flowrate_data = None
         self.custom_lib_definitions = {}
         self.custom_composition_definitions = {}
-        
-        save_shortcut = QShortcut(QKeySequence("Ctrl+S"), self) # Add Command+S shortcut to save current state
-        save_shortcut.activated.connect(lambda: save_file(self))
-        
-        print_shortcut = QShortcut(QKeySequence("Ctrl+P"), self) # add command+p shortcut to export current sheet to pdf
-        print_shortcut.activated.connect(lambda: self.current_page().export_current_sheet_pdf() if hasattr(self.current_page(), 'export_current_sheet_pdf') else None)
-        
+        self.custom_flowrate_profiles = {}
+        self._copied_scenario = None
+        self.current_save_path = None
+
         self.create_menus()
         
         
@@ -199,15 +105,16 @@ class BaseWindow(QMainWindow):
         backButton = menubar.addAction('Back')# back button
         backButton.triggered.connect(lambda: self.show_page("IntroPage"))
         fileMenu = menubar.addMenu('File')
-        dataMenu = menubar.addMenu('Data')
-        import_scenarios = dataMenu.addAction('Import Scenarios')
-        import_scenarios.triggered.connect(lambda: load_file(self, "battery_data/scenarios.zip"))
-        generate_template = dataMenu.addAction('Generate Template')
-        generate_template.triggered.connect(lambda checked=False: generate_input_template(self))
-        openFile = fileMenu.addAction('Open')
-        openFile.triggered.connect(lambda: open_file(self))
-        saveFile = fileMenu.addAction('Save')
-        saveFile.triggered.connect(lambda: save_file(self))
+        openAction = fileMenu.addAction('Open Session...')
+        openAction.setShortcut(QKeySequence.Open)
+        openAction.triggered.connect(self.open_session)
+        saveAction = fileMenu.addAction('Save Session')
+        saveAction.setShortcut(QKeySequence.Save)
+        saveAction.triggered.connect(lambda: self.save_session(use_current_path=True))
+        saveAsAction = fileMenu.addAction('Save Session As...')
+        saveAsAction.setShortcut(QKeySequence.SaveAs)
+        saveAsAction.triggered.connect(lambda: self.save_session(use_current_path=False))
+        fileMenu.addSeparator()
         exitAction = fileMenu.addAction('Exit')
         exitAction.triggered.connect(lambda: ask_to_close(self))
 
@@ -215,8 +122,47 @@ class BaseWindow(QMainWindow):
         for _theme_name in _THEMES:
             _action = themeMenu.addAction(_theme_name)
             _action.triggered.connect(lambda checked=False, t=_theme_name: apply_theme(t))
-        
-        
+
+    def save_session(self, use_current_path=False):
+        path = self.current_save_path if use_current_path else None
+        if save_program_state(self, _current_theme, path=path):
+            self.setWindowTitle(f"Charlie's Proprietary LIB Offgas Modelling Tool - {self.current_save_path}")
+
+    def open_session(self):
+        path, theme_name = load_program_state(self)
+        if not path:
+            return
+        if theme_name in _THEMES:
+            apply_theme(theme_name)
+        self.setWindowTitle(f"Charlie's Proprietary LIB Offgas Modelling Tool - {path}")
+
+# Helper functions for shared UI behaviour such as theme switching and simple
+# window actions used by multiple pages.
+def apply_theme(theme_name: str) -> None:
+    """Apply a named theme to the whole application by setting the QSS."""
+    global _current_theme
+    _current_theme = theme_name
+    app = QApplication.instance()
+    if app:
+        app.setStyleSheet(_THEMES.get(theme_name, ""))
+
+
+def _make_toolbar_separator() -> QFrame:
+    """Vertical line widget for visually separating toolbar groups."""
+    sep = QFrame()
+    sep.setFrameShape(QFrame.VLine)
+    sep.setFrameShadow(QFrame.Sunken)
+    sep.setFixedWidth(2)
+    sep.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+    return sep
+
+
+def ask_to_close(self):
+    reply = QMessageBox.question(self, 'Exit', 'Are you sure you want to exit?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+    if reply == QMessageBox.Yes:
+        self.close()
+
+
 # Landing page that presents the main tools available in the application.
 class IntroPage(QWidget):
     def __init__(self, base_window):
@@ -280,927 +226,481 @@ class IntroPage(QWidget):
         layout.addStretch()
 
 
-# Dialog for creating or editing a custom LIB definition and optional flowrate data.
-class LIBDefinitionDialog(QDialog):
-    """Dialog for creating a custom LIB type from required LIB input fields."""
+# Study tree node kinds. Stored on each item under NODE_TYPE_ROLE.
+NODE_STUDY = "study"
+NODE_GROUP = "group"
+NODE_SCENARIO = "scenario"
 
-    _DEFAULTS = {
-        "LFL (%)": "4.0",
-        "Battery Charge (%)": "100",
-        "CO (%)": "0",
-        "CO2 (%)": "0",
-        "H2 (%)": "0",
-        "Total Hydrocarbons (%)": "0",
-    }
+NODE_TYPE_ROLE = Qt.UserRole + 1
+NODE_ID_ROLE = Qt.UserRole + 2
 
-    def __init__(self, parent=None, prefill=None):
+# Combo entry meaning "no user-defined composition selected" for LIBInputs.gas_composition.
+NO_COMPOSITION = "None"
+
+# Combo entry meaning "no user-defined battery selected" for LIBInputs.lib_spec.
+NO_LIB = "None"
+
+# Combo entry meaning "no imported dataset selected" for LIBInputs.flowrate_profile.
+NO_FLOWRATE = "None"
+
+
+# Dialog that builds a named GasComposition from a percentage per CHEMICAL_PROPERTIES
+# species. Only the percentages are captured here - density/LFL/factors stay in
+# CHEMICAL_PROPERTIES and are looked up through the dataclass.
+class GasCompositionDialog(QDialog):
+    def __init__(self, parent, existing_names=(), composition=None):
         super().__init__(parent)
-        self._prefill = prefill or {}
-        edit_mode = bool(prefill)
-        self.setWindowTitle("Edit LIB" if edit_mode else "Add LIB")
-        self.setMinimumSize(560, 620)
-        self.resize(620, 700)
-        self._field_widgets = {}
-        self._flowrate_data = self._prefill.get("_flowrate_data")
+        self.setWindowTitle("Gas Composition" if composition is not None else "Add Gas Composition")
+        self._existing_names = set(existing_names)
+        if composition is not None:
+            self._existing_names.discard(composition.name)
+        self.result_composition = None
 
-        root_layout = QVBoxLayout(self)
-
-        title = QLabel("Edit Custom LIB Type" if edit_mode else "Create Custom LIB Type")
-        title_font = title.font()
-        title_font.setPointSize(12)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        root_layout.addWidget(title)
-
-        type_form = QFormLayout()
-        self.lib_type_name = QLineEdit()
-        self.lib_type_name.setPlaceholderText("e.g. VendorX 280Ah")
-        self.lib_type_name.setToolTip("Name of the custom LIB type shown in scenario selection")
-        if self._prefill.get("lib_type_name"):
-            self.lib_type_name.setText(self._prefill["lib_type_name"])
-            self.lib_type_name.setReadOnly(True)
-        type_form.addRow("LIB Type Name:", self.lib_type_name)
-        self.import_flowrate_btn = QPushButton("Import Flowrate Data")
-        self.import_flowrate_btn.setToolTip(
-            "Import module variable flowrate data to be associated with this custom LIB."
-        )
-        self.import_flowrate_btn.clicked.connect(self._import_flowrate_data)
-        _flowrate_count = len(next(iter(self._flowrate_data.values()), [])) if isinstance(self._flowrate_data, dict) else 0
-        self.flowrate_status_label = QLabel(
-            f"Flowrate data imported ({_flowrate_count} seconds)." if _flowrate_count else "No flowrate data imported (optional)."
-        )
-        self.flowrate_status_label.setWordWrap(True)
-        type_form.addRow("Variable Flowrate:", self.import_flowrate_btn)
-        type_form.addRow("", self.flowrate_status_label)
-        self.battery_chemistry_combo = QComboBox()
-        self.battery_chemistry_combo.addItems(["NMC", "LFP", "LCO"])
-        self.battery_chemistry_combo.setToolTip(
-            "Battery chemistry type associated with this LIB."
-        )
-        prefill_chem = str(self._prefill.get("Battery Chemistry", "NMC") or "NMC").upper()
-        idx = self.battery_chemistry_combo.findText(prefill_chem)
-        if idx >= 0:
-            self.battery_chemistry_combo.setCurrentIndex(idx)
-        type_form.addRow("Battery Chemistry:", self.battery_chemistry_combo)
-        root_layout.addLayout(type_form)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        form_container = QWidget()
-        form_layout = QFormLayout(form_container)
-        form_layout.setHorizontalSpacing(16)
-        form_layout.setVerticalSpacing(9)
-        form_layout.setContentsMargins(8, 8, 8, 8)
-
-        prefill_inputs = self._prefill.get("inputs", {})
-        for label in REQ_LIB_INFO:
-            widget = QLineEdit()
-            if label in prefill_inputs:
-                widget.setText(str(prefill_inputs[label]))
-            elif label in self._DEFAULTS:
-                widget.setText(self._DEFAULTS[label])
-            if label in TOOLTIPS:
-                widget.setToolTip(TOOLTIPS[label])
-            self._field_widgets[label] = widget
-            form_layout.addRow(f"{label}:", widget)
-
-        scroll.setWidget(form_container)
-        root_layout.addWidget(scroll, 1)
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        root_layout.addWidget(btn_box)
-
-    def _import_flowrate_data(self):
-        data = import_gas_flowrate_data(self, store_attr=None)
-        if data is None:
-            return
-        self._flowrate_data = data
-        sample_count = len(next(iter(data.values()), []))
-        self.flowrate_status_label.setText(
-            f"Flowrate data imported for this LIB ({sample_count} seconds)."
-        )
-
-    def get_payload(self):
-        """Return custom LIB name and raw input values from the form."""
-        return {
-            "lib_type_name": self.lib_type_name.text().strip(),
-            "inputs": {k: w.text().strip() for k, w in self._field_widgets.items()},
-            "flowrate_data": self._flowrate_data,
-            "battery_chemistry": self.battery_chemistry_combo.currentText(),
-        }
-
-
-# ---------------------------------------------------------------------------
-# Composition definition dialog
-# ---------------------------------------------------------------------------
-
-# Dialog for saving a named gas composition made from the tracked chemicals.
-class CompositionDefinitionDialog(QDialog):
-    """Dialog for defining a named gas composition from all tracked chemicals."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Add Composition")
-        self.setMinimumSize(480, 560)
-        self.resize(520, 640)
-        self._field_widgets = {}
-
-        root_layout = QVBoxLayout(self)
-
-        title = QLabel("Create Gas Composition")
-        title_font = title.font()
-        title_font.setPointSize(12)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        root_layout.addWidget(title)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("e.g. NMC UL9540A Test 3")
+        self.name_edit.setToolTip("Name this composition appears under in the scenario dialog.")
+        if composition is not None:
+            self.name_edit.setText(composition.name)
 
         name_form = QFormLayout()
-        self.composition_title = QLineEdit()
-        self.composition_title.setPlaceholderText("e.g. NMC Standard Mix")
-        self.composition_title.setToolTip("Name of the composition shown in scenario selection")
-        name_form.addRow("Composition Title:", self.composition_title)
-        root_layout.addLayout(name_form)
+        name_form.addRow("Composition Name:", self.name_edit)
+
+        gas_page = QWidget()
+        gas_form = QFormLayout(gas_page)
+        gas_form.setHorizontalSpacing(16)
+        gas_form.setVerticalSpacing(6)
+
+        self._gas_edits = {}
+        for gas, properties in CHEMICAL_PROPERTIES.items():
+            initial = composition.percentages.get(gas, 0) if composition is not None else 0
+            edit = QLineEdit(str(initial))
+            edit.setValidator(QDoubleValidator(0.0, 100.0, 6))
+            edit.setToolTip(
+                f"Share of the total off-gas that is {gas} (%).\n"
+                f"Density: {properties['density']} g/L, LFL: {properties['lfl']}"
+            )
+            edit.textChanged.connect(self._update_total)
+            gas_form.addRow(f"{gas.upper()} (%):", edit)
+            self._gas_edits[gas] = edit
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        form_container = QWidget()
-        form_layout = QFormLayout(form_container)
-        form_layout.setHorizontalSpacing(16)
-        form_layout.setVerticalSpacing(9)
-        form_layout.setContentsMargins(8, 8, 8, 8)
+        scroll.setWidget(gas_page)
 
-        for chem_key in CHEMICAL_PROPERTIES:
-            label = GAS_LABEL_FIX.get(chem_key, chem_key.replace("_", " ").title())
-            widget = QLineEdit()
-            widget.setPlaceholderText("0.0")
-            widget.setToolTip(f"Percentage of {label} in the vented gas composition (%)")
-            self._field_widgets[chem_key] = widget
-            form_layout.addRow(f"{label} (%):", widget)
+        self.total_label = QLabel()
 
-        scroll.setWidget(form_container)
-        root_layout.addWidget(scroll, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        root_layout.addWidget(btn_box)
+        layout = QVBoxLayout(self)
+        layout.addLayout(name_form)
+        layout.addWidget(scroll)
+        layout.addWidget(self.total_label)
+        layout.addWidget(buttons)
+        self.resize(420, 620)
+        self._update_total()
 
-    def get_payload(self):
-        """Return composition title and chemical percentages."""
-        return {
-            "composition_title": self.composition_title.text().strip(),
-            "chemicals": {k: w.text().strip() for k, w in self._field_widgets.items()},
-        }
+    def _percentages(self):
+        values = {}
+        for gas, edit in self._gas_edits.items():
+            text = edit.text().strip().replace(",", ".")
+            if not text:
+                continue
+            try:
+                values[gas] = float(text)
+            except ValueError as exc:
+                raise ValueError(f"{gas.upper()} must be a valid percentage.") from exc
+        return values
+
+    def _update_total(self):
+        try:
+            total = sum(self._percentages().values())
+        except ValueError:
+            self.total_label.setText("Total: invalid entry")
+            return
+        self.total_label.setText(f"Total: {total:.2f} %")
+
+    def _on_accept(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Input Error", "Enter a name for the composition.")
+            return
+        if name in self._existing_names or name == NO_COMPOSITION:
+            QMessageBox.warning(self, "Input Error", f"A composition named '{name}' already exists.")
+            return
+
+        try:
+            percentages = self._percentages()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Input Error", str(exc))
+            return
+
+        if not any(value > 0 for value in percentages.values()):
+            QMessageBox.warning(self, "Input Error", "Enter a percentage for at least one gas.")
+            return
+
+        self.result_composition = GasComposition(name=name, percentages=percentages)
+        self.accept()
 
 
-# ---------------------------------------------------------------------------
-# Scenario input dialog
-# ---------------------------------------------------------------------------
-
-# Tabbed dialog for editing the full set of inputs for a single scenario.
-class ScenarioInputDialog(QDialog):
-    """Tabbed form for editing all inputs of a single scenario."""
-
-    CELL_PROPAGATION_METHOD = "Cell Propagation"
-
-    _DISPLAY_NAMES = {
-        "cell_volume_(l)":       "Cell Volume (L)",
-        "cell_duration_(s)":     "Cell Duration (s)",
-        "module_volume_(l)":     "Module Volume (L)",
-        "module_duration_(s)":   "Module Duration (s)",
-        "module_capacity_(kwh)": "Module Capacity (kWh)",
-    }
-
-    _EXTRA_TOOLTIPS = {
-        "Cells per module":      "Number of cells per module",
-        "Modules per unit":      "Number of modules per unit",
-        "Calculation Method":    "Calculation pathway used for this scenario.",
-        "Use Le Chatelier LFL":  "Use Le Chatelier blending for flammable LFL thresholding.",
-        "Use Temperature Dependent LFL": "Adjust gas LFL values using venting temperature.",
-        "cell_volume_(l)":       "Volume of a single cell (litres)",
-        "cell_duration_(s)":     "Duration of a single cell venting event (s)",
-        "module_volume_(l)":     "Volume of a single module (litres)",
-        "module_duration_(s)":   "Duration of a single module venting event (s)",
-        "module_capacity_(kwh)": "Capacity of a single module (kWh)",
-        "LFL (%)": "Lower Flammability Limit of the battery gas mixture (%)",
-        "Venting Temperature (°C)": "Temperature of the venting gases (°C) — required for temperature-dependent LFL",
-        "Battery Charge (%)":    "State of charge of the battery at start of event",
-        "Carbon Monoxide (%)":   "Carbon monoxide fraction of total released gas (%)",
-        "Carbon Dioxide (%)":    "Carbon dioxide fraction of total released gas (%)",
-        "Hydrogen (%)":          "Hydrogen fraction of total released gas (%)",
-        "Total Hydrocarbons (%)":"Total hydrocarbon fraction of total released gas (%)",
-        "Manufacturer Name":     "Battery manufacturer name",
-        "Battery Room":          "Name or ID of the battery room",
-        "Scenario Description":    "Short description of the scenario for identification",
-        "Composition Method":       "Method used to determine the gas composition for this scenario",
-        "Cell Propagation Delay (s)": "Seconds between cell initiation waves inside a module.",
-        "No. Cells Propagating": "Number of cells that initiate together for each cell propagation wave.",
-        "Cell Model Module Propagation Delay (s)": "Seconds between module initiation waves for the cell propagation model.",
-        "No. Modules Propagating": "Number of additional modules that initiate together in each module wave.",
-        "Initially Propagating Modules": "Number of modules already initiating at t=0 for the cell propagation model.",
-    }
-
-    _BASE_TAB_FIELDS = [
-        ("Scenario Info", [
-            "Scenario Description",
-            "Battery Room",
-            "Generated LIB",
-            "Composition Method",
-            "Gas Composition",
-            "Cells per module",
-            "Modules per unit",
-            "Units",
-            "Module Propagation Delay (s)",
-            "Calculation Method",
-            "Use Le Chatelier LFL",
-            "Use Temperature Dependent LFL",
-        ]),
-        ("Room & Ventilation", [
-            "Room Area (m2)",
-            "Room Height (m)",
-            "Equipment Space (%)",
-            "Ventilation Rate (L/s/m2)",
-            "Vent Switch Conc (%)",
-            "Emergency Vent Rate (L/s/m2)",
-            "Calculation Duration (s)",
-        ]),
+# Dialog that builds a named LIBSpec - the battery definition a scenario points at.
+# Like ScenarioInputDialog it keeps no parallel copy of the field values; the form is
+# generated from LIBSpec's field metadata and read straight back into a LIBSpec.
+class BatteryDefinitionDialog(QDialog):
+    # Every LIBSpec field must be assigned to a tab (build_tabbed_form enforces this).
+    TAB_FIELDS = [
+        ("General", ["name", "lib_type", "cell_format", "battery_charge", "venting_temperature", "lfl"]),
+        ("Cell", ["cell_volume", "cell_duration", "cell_amphour", "cell_capacity"]),
+        ("Module", ["module_volume", "module_duration", "module_amphour", "module_capacity"]),
+        ("Propagation", ["cell_prop_delay", "cell_prop_number", "mod_prop_delay", "mod_prop_number"]),
     ]
 
-    _CELL_PROPAGATION_TAB = (
-        "Cell Propagation",
-        [
-            "Cell Propagation Delay (s)",
-            "No. Cells Propagating",
-            "Cell Model Module Propagation Delay (s)",
-            "No. Modules Propagating",
-            "Initially Propagating Modules",
-        ],
-    )
-
-    _DEFAULTS = {
-        "Module Propagation Delay (s)": "180",
-        "Battery Charge (%)":           "100",
-        "Calculation Duration (s)":     "3600",
-        "Calculation Method":           CALCULATION_METHODS[0],
-        "Composition Method":           COMPOSITION_METHODS[0],
-        "Cell Propagation Delay (s)": "60",
-        "No. Cells Propagating": "2",
-        "Cell Model Module Propagation Delay (s)": "300",
-        "No. Modules Propagating": "2",
-        "Initially Propagating Modules": "1",
-    }
-
-    def __init__(self, scenario_name: str = "New Scenario", data: dict = None, lib_types=None, lib_definitions=None, composition_options=None, composition_definitions=None, parent=None):
+    def __init__(self, parent, spec: LIBSpec | None = None, existing_names=()):
         super().__init__(parent)
-        self.setWindowTitle(f"Edit Scenario — {scenario_name}")
-        self.setMinimumSize(500, 460)
-        self.resize(540, 580)
-        self._field_widgets: dict = {}
-        self._form_labels: dict = {}
-        self._lib_types = list(lib_types) if lib_types else list(LIB_TYPE)
-        self._lib_definitions = dict(lib_definitions) if lib_definitions else {}
-        self._composition_options = list(composition_options) if composition_options else []
-        self._composition_definitions = dict(composition_definitions) if composition_definitions else {}
+        self.setWindowTitle("Battery Definition")
+        self.result_spec = spec if spec is not None else LIBSpec()
+        self._existing_names = set(existing_names) - {self.result_spec.name}
+
+        form_tabs, self._field_widgets = build_tabbed_form(
+            LIBSpec,
+            self.TAB_FIELDS,
+            instance=self.result_spec,
+            choices={"lib_type": LIB_TYPE, "cell_format": CELL_FORMAT},
+        )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(form_tabs)
+        layout.addWidget(buttons)
+        self.resize(520, 560)
+
+    def _on_accept(self):
+        try:
+            spec = read_form(LIBSpec, self._field_widgets)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Input Error", str(exc))
+            return
+
+        if not spec.name:
+            QMessageBox.warning(self, "Input Error", "Enter a name for the battery.")
+            return
+        if spec.name in self._existing_names or spec.name == NO_LIB:
+            QMessageBox.warning(self, "Input Error", f"A battery named '{spec.name}' already exists.")
+            return
+
+        self.result_spec = spec
+        self.accept()
+
+
+# Dialog that edits a single LIBInputs instance using an auto-generated form.
+# LIBInputs is the single source of truth here: this dialog keeps no parallel
+# copy of field values - it only reads/writes LIBInputs via dataclass_forms.
+class ScenarioInputDialog(QDialog):
+    # Every LIBInputs field must be assigned to a tab (build_tabbed_form enforces this).
+    TAB_FIELDS = [
+        ("General", ["scenario_description", "manufacturer_name", "battery_room",
+                     "lib_spec", "cells_per_module", "modules_per_unit", "units",
+                     "calc_method", "composition_method", "gas_composition",
+                     "flowrate_profile"]),
+        ("Room Details", ["room_height", "room_area", "equip_space", "ventilation_rate",
+                           "emergency_vent_rate", "vent_switch_conc"]),
+        ("Calculation", ["calc_duration", "time_step", "use_le_chatelier_lfl",
+                          "use_temp_dependent_lfl"]),
+    ]
+
+    def __init__(self, parent, inputs: LIBInputs, composition_names=None, lib_names=None,
+                 flowrate_names=None):
+        super().__init__(parent)
+        self.setWindowTitle("Scenario Inputs")
+        self.result_inputs = inputs
+
+        form_tabs, self._field_widgets = build_tabbed_form(
+            LIBInputs,
+            self.TAB_FIELDS,
+            instance=inputs,
+            choices={
+                "calc_method": CALCULATION_METHODS,
+                "composition_method": COMPOSITION_METHODS,
+                "gas_composition": list(composition_names or [NO_COMPOSITION]),
+                "lib_spec": list(lib_names or [NO_LIB]),
+                "flowrate_profile": list(flowrate_names or [NO_FLOWRATE]),
+            },
+        )
+
+        # only the fields the chosen methods actually consume stay enabled
+        self._field_widgets["calc_method"].currentTextChanged.connect(self._update_dependent_fields)
+        self._field_widgets["composition_method"].currentTextChanged.connect(self._update_dependent_fields)
+        self._update_dependent_fields()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(form_tabs)
+        layout.addWidget(buttons)
+        self.resize(520, 620)
+
+    def _update_dependent_fields(self, _text=None):
+        widgets = self._field_widgets
+        user_defined = widgets["composition_method"].currentText() == "User Defined"
+        widgets["gas_composition"].setEnabled(user_defined)
+        if not user_defined:
+            widgets["gas_composition"].setToolTip(
+                "Only used when the Composition Method is 'User Defined'.")
+
+        variable = widgets["calc_method"].currentText() == CALC_METHOD_MODULE_VARIABLE_FLOWRATE
+        widgets["flowrate_profile"].setEnabled(variable)
+        if not variable:
+            widgets["flowrate_profile"].setToolTip(
+                "Only used by the 'Module Variable Flowrate' calculation method.")
+
+    def _validation_problems(self, inputs):
+        """Configuration contradictions that would make the run fail later."""
+        problems = []
+        if inputs.lib_spec == NO_LIB:
+            problems.append("Select a battery ('Battery (LIB)') - create one with 'Add LIB' first.")
+        if (inputs.calc_method == CALC_METHOD_MODULE_VARIABLE_FLOWRATE
+                and inputs.flowrate_profile == NO_FLOWRATE):
+            problems.append("The 'Module Variable Flowrate' method needs an imported "
+                            "flowrate dataset ('Flowrate Dataset').")
+        if (inputs.composition_method == "User Defined"
+                and inputs.gas_composition == NO_COMPOSITION):
+            problems.append("The 'User Defined' composition method needs a gas composition - "
+                            "create one with 'Add Composition' first.")
+        return problems
+
+    def _on_accept(self):
+        try:
+            inputs = read_form(LIBInputs, self._field_widgets)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Input Error", str(exc))
+            return
+
+        problems = self._validation_problems(inputs)
+        if problems:
+            QMessageBox.warning(self, "Scenario Configuration", "\n\n".join(problems))
+            return
+
+        self.result_inputs = inputs
+        self.accept()
+
+
+# One dialog to view, add, edit, delete and import every named library object the
+# scenarios reference: batteries (LIBSpec), gas compositions (GasComposition) and
+# measured flowrate datasets (FlowrateProfile). Scenarios store only the names;
+# LIBPage rebinds the objects after the dialog closes.
+class LibraryManagerDialog(QDialog):
+    def __init__(self, parent, base_window):
+        super().__init__(parent)
+        self.base_window = base_window
+        self.setWindowTitle("Libraries")
 
         tabs = QTabWidget()
-        self._tabs = tabs
-        self._tab_widgets: dict = {}
+        self._battery_list = self._make_tab(
+            tabs, "Batteries (LIB)",
+            add=self._add_battery, edit=self._edit_battery,
+            delete=lambda: self._delete_item(self._battery_list,
+                                             self.base_window.custom_lib_definitions, "battery"),
+        )
+        self._composition_list = self._make_tab(
+            tabs, "Gas Compositions",
+            add=self._add_composition, edit=self._edit_composition,
+            delete=lambda: self._delete_item(self._composition_list,
+                                             self.base_window.custom_composition_definitions,
+                                             "composition"),
+        )
+        self._flowrate_list = self._make_tab(
+            tabs, "Flowrate Datasets",
+            add=self._import_flowrate, edit=None,
+            delete=lambda: self._delete_item(self._flowrate_list,
+                                             self.base_window.custom_flowrate_profiles, "dataset"),
+            add_label="Import CSV...",
+            hint=("A dataset is a two-column CSV (time in seconds, flowrate in L/s) describing "
+                  "ONE module's total off-gas flowrate, e.g. extracted from a UL9540A test "
+                  "report with WebPlotDigitizer. It is used by the 'Module Variable Flowrate' "
+                  "calculation method."),
+        )
 
-        for tab_title, fields in self._BASE_TAB_FIELDS:
-            tab_w = QWidget()
-            form = QFormLayout(tab_w)
-            form.setHorizontalSpacing(16)
-            form.setVerticalSpacing(9)
-            form.setContentsMargins(14, 12, 14, 12)
-
-            for field in fields:
-                display = self._DISPLAY_NAMES.get(field, field)
-                tooltip = (
-                    self._EXTRA_TOOLTIPS.get(field)
-                    or TOOLTIPS.get(field)
-                    or TOOLTIPS.get(field.rstrip(")").rsplit(" (", 1)[0])
-                    or ""
-                )
-
-                if field == "Generated LIB":
-                    w = QComboBox()
-                    w.addItem("Missing LIB")
-                    if self._lib_types:
-                        w.addItems(self._lib_types)
-                elif field == "Composition Method":
-                    w = QComboBox()
-                    w.addItems(COMPOSITION_METHODS)
-                    default_method = self._DEFAULTS.get("Composition Method")
-                    if default_method:
-                        idx = w.findText(default_method)
-                        if idx >= 0:
-                            w.setCurrentIndex(idx)
-                elif field == "Gas Composition":
-                    w = QComboBox()
-                    w.addItem("None")
-                    if self._composition_options:
-                        w.addItems(self._composition_options)
-                    w.setToolTip("Named composition created via Add Composition (used when Composition Method is 'User Defined').")
-                elif field == "Calculation Method":
-                    w = QComboBox()
-                    w.addItems(CALCULATION_METHODS)
-                    default_method = self._DEFAULTS.get("Calculation Method")
-                    if default_method:
-                        default_index = w.findText(default_method)
-                        if default_index >= 0:
-                            w.setCurrentIndex(default_index)
-                elif field in ("Use Le Chatelier LFL", "Use Temperature Dependent LFL"):
-                    w = QCheckBox()
-                else:
-                    w = QLineEdit()
-                    if not is_string_field(field):
-                        w.setPlaceholderText("0.0")
-                    # Apply default only for new scenarios without loaded data
-                    if data is None and field in self._DEFAULTS:
-                        w.setText(self._DEFAULTS[field])
-
-                if tooltip:
-                    w.setToolTip(tooltip)
-                self._field_widgets[field] = w
-                form.addRow(display + ":", w)
-                # Track the label widget for dynamic show/hide
-                row_num = form.rowCount() - 1
-                label_item = form.itemAt(row_num, QFormLayout.LabelRole)
-                if label_item and label_item.widget():
-                    self._form_labels[field] = label_item.widget()
-
-            tabs.addTab(tab_w, tab_title)
-            self._tab_widgets[tab_title] = tab_w
-
-        cell_prop_tab_title, cell_prop_fields = self._CELL_PROPAGATION_TAB
-        cell_prop_tab = QWidget()
-        cell_prop_form = QFormLayout(cell_prop_tab)
-        cell_prop_form.setHorizontalSpacing(16)
-        cell_prop_form.setVerticalSpacing(9)
-        cell_prop_form.setContentsMargins(14, 12, 14, 12)
-
-        for field in cell_prop_fields:
-            display = self._DISPLAY_NAMES.get(field, field)
-            tooltip = (
-                self._EXTRA_TOOLTIPS.get(field)
-                or TOOLTIPS.get(field)
-                or TOOLTIPS.get(field.rstrip(")").rsplit(" (", 1)[0])
-                or ""
-            )
-
-            w = QLineEdit()
-            if not is_string_field(field):
-                w.setPlaceholderText("0.0")
-            if data is None and field in self._DEFAULTS:
-                w.setText(self._DEFAULTS[field])
-
-            if tooltip:
-                w.setToolTip(tooltip)
-            self._field_widgets[field] = w
-            cell_prop_form.addRow(display + ":", w)
-            row_num = cell_prop_form.rowCount() - 1
-            label_item = cell_prop_form.itemAt(row_num, QFormLayout.LabelRole)
-            if label_item and label_item.widget():
-                self._form_labels[field] = label_item.widget()
-
-        self._tab_widgets[cell_prop_tab_title] = cell_prop_tab
-
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
-        layout.addWidget(btn_box)
+        layout.addWidget(buttons)
+        self.resize(520, 460)
+        self._refresh_lists()
 
-        if data:
-            self._load_data(data)
+    def _make_tab(self, tabs, title, add, edit, delete, add_label="Add...", hint=None):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setWordWrap(True)
+            layout.addWidget(hint_label)
+        list_widget = QListWidget()
+        layout.addWidget(list_widget)
 
-        # Connect Composition Method to Gas Composition row visibility
-        comp_method_w = self._field_widgets.get("Composition Method")
-        if isinstance(comp_method_w, QComboBox):
-            comp_method_w.currentTextChanged.connect(self._update_composition_visibility)
-        self._update_composition_visibility(
-            comp_method_w.currentText() if isinstance(comp_method_w, QComboBox) else ""
-        )
+        button_row = QHBoxLayout()
+        add_button = QPushButton(add_label)
+        add_button.clicked.connect(add)
+        button_row.addWidget(add_button)
+        if edit is not None:
+            edit_button = QPushButton("Edit...")
+            edit_button.clicked.connect(edit)
+            button_row.addWidget(edit_button)
+        delete_button = QPushButton("Delete")
+        delete_button.clicked.connect(delete)
+        button_row.addWidget(delete_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
 
-        calc_method_w = self._field_widgets.get("Calculation Method")
-        if isinstance(calc_method_w, QComboBox):
-            calc_method_w.currentTextChanged.connect(self._update_cell_propagation_tab_visibility)
-        self._update_cell_propagation_tab_visibility(
-            calc_method_w.currentText() if isinstance(calc_method_w, QComboBox) else ""
-        )
+        tabs.addTab(page, title)
+        return list_widget
 
-    def _update_cell_propagation_tab_visibility(self, method_text: str = ""):
-        """Show Cell Propagation tab only when the calculation method is selected."""
-        tab_title, _fields = self._CELL_PROPAGATION_TAB
-        tab_widget = self._tab_widgets.get(tab_title)
-        if tab_widget is None:
+    def _refresh_lists(self):
+        self._battery_list.clear()
+        self._battery_list.addItems(list(self.base_window.custom_lib_definitions))
+        self._composition_list.clear()
+        self._composition_list.addItems(list(self.base_window.custom_composition_definitions))
+        self._flowrate_list.clear()
+        for name, profile in self.base_window.custom_flowrate_profiles.items():
+            self._flowrate_list.addItem(f"{name}   ({profile.duration():.0f} s, "
+                                        f"{profile.total_volume_l():.1f} l)")
+
+    def _selected_name(self, list_widget):
+        item = list_widget.currentItem()
+        if item is None:
+            return None
+        return item.text().split("   (")[0]
+
+    def _delete_item(self, list_widget, store, noun):
+        name = self._selected_name(list_widget)
+        if name is None or name not in store:
+            return
+        confirm = QMessageBox.question(
+            self, "Delete",
+            f"Delete {noun} '{name}'?\nScenarios referencing it will need a new selection "
+            "before they can run.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        store.pop(name, None)
+        self._refresh_lists()
+
+    # -- batteries -----------------------------------------------------------
+
+    def _add_battery(self):
+        dialog = BatteryDefinitionDialog(self, existing_names=self.base_window.custom_lib_definitions)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        spec = dialog.result_spec
+        self.base_window.custom_lib_definitions[spec.name] = spec
+        self._refresh_lists()
+
+    def _edit_battery(self):
+        definitions = self.base_window.custom_lib_definitions
+        name = self._selected_name(self._battery_list)
+        if name is None or name not in definitions:
+            return
+        dialog = BatteryDefinitionDialog(self, copy.deepcopy(definitions[name]),
+                                         existing_names=definitions)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        spec = dialog.result_spec
+        if spec.name != name:
+            definitions.pop(name, None)
+        definitions[spec.name] = spec
+        self._refresh_lists()
+
+    # -- compositions ----------------------------------------------------------
+
+    def _add_composition(self):
+        dialog = GasCompositionDialog(self, self.base_window.custom_composition_definitions)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        composition = dialog.result_composition
+        self.base_window.custom_composition_definitions[composition.name] = composition
+        self._refresh_lists()
+
+    def _edit_composition(self):
+        definitions = self.base_window.custom_composition_definitions
+        name = self._selected_name(self._composition_list)
+        if name is None or name not in definitions:
+            return
+        dialog = GasCompositionDialog(self, definitions, composition=definitions[name])
+        if dialog.exec() != QDialog.Accepted:
+            return
+        composition = dialog.result_composition
+        if composition.name != name:
+            definitions.pop(name, None)
+        definitions[composition.name] = composition
+        self._refresh_lists()
+
+    # -- flowrate datasets -----------------------------------------------------
+
+    def _import_flowrate(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Flowrate Dataset", "", "CSV files (*.csv);;All files (*.*)")
+        if not path:
             return
 
-        should_show = (method_text == self.CELL_PROPAGATION_METHOD)
-        current_index = self._tabs.indexOf(tab_widget)
-        if should_show and current_index == -1:
-            self._tabs.addTab(tab_widget, tab_title)
-        elif not should_show and current_index != -1:
-            self._tabs.removeTab(current_index)
-
-    def _update_composition_visibility(self, method_text: str = ""):
-        """Show Gas Composition row only when Composition Method is 'User Defined'."""
-        show = (method_text == "User Defined")
-        for key in ("Gas Composition",):
-            w = self._field_widgets.get(key)
-            lbl = self._form_labels.get(key)
-            if w:
-                w.setVisible(show)
-            if lbl:
-                lbl.setVisible(show)
-
-    def _load_data(self, data: dict):
-        for field, w in self._field_widgets.items():
-            if field == "Generated LIB":
-                val = data.get("Generated LIB", data.get("LIB Type", ""))
-            else:
-                val = data.get(field, "")
-            if isinstance(w, QComboBox):
-                idx = w.findText(str(val) if val else "")
-                if idx >= 0:
-                    w.setCurrentIndex(idx)
-            elif isinstance(w, QCheckBox):
-                if isinstance(val, str):
-                    w.setChecked(val.strip().lower() in {"1", "true", "yes", "on"})
-                else:
-                    w.setChecked(bool(val))
-            else:
-                w.setText("" if (val is None or val == "") else str(val))
-
-    def accept(self):
-        super().accept()
-
-    def get_data(self) -> dict:
-        """Return {COMBINED_INPUTS field label: raw string value}."""
-        result = {}
-        for field, w in self._field_widgets.items():
-            if isinstance(w, QComboBox):
-                result[field] = w.currentText()
-            elif isinstance(w, QCheckBox):
-                result[field] = bool(w.isChecked())
-            else:
-                result[field] = w.text().strip()
-
-        selected_generated_lib = str(result.get("Generated LIB", "") or "").strip()
-        if selected_generated_lib == "No custom LIBs added":
-            selected_generated_lib = "Missing LIB"
-        result["LIB Type"] = selected_generated_lib
-
-        selected_lib = selected_generated_lib
-        custom_lib = self._lib_definitions.get(selected_lib)
-        if custom_lib:
-            result["_custom_lib_data"] = dict(custom_lib)
-
-        selected_composition = str(result.get("Gas Composition", "") or "").strip()
-        if selected_composition and selected_composition != "None":
-            comp_data = self._composition_definitions.get(selected_composition)
-            if comp_data:
-                result["_composition_data"] = dict(comp_data)
-        return result
-
-
-# ---------------------------------------------------------------------------
-# Scenario tree — three-level hierarchy: Project → Type → Scenario
-# ---------------------------------------------------------------------------
-
-# Top-level tree node representing a project in the scenario hierarchy.
-class ProjectTreeItem(QTreeWidgetItem):
-    """Top-level project node."""
-
-    def __init__(self, name: str = "My Project"):
-        super().__init__()
-        self.project_name = name
-        self._refresh()
-
-    def _refresh(self):
-        self.setText(0, f"\u25b6  {self.project_name}")
-
-    def rename(self, new_name: str):
-        self.project_name = new_name
-        self._refresh()
-
-
-# Mid-level tree node grouping scenarios by category or type.
-class ScenarioTypeTreeItem(QTreeWidgetItem):
-    """Mid-level scenario-type / category node."""
-
-    def __init__(self, name: str = "New Type"):
-        super().__init__()
-        self.type_name = name
-        self._refresh()
-
-    def _refresh(self):
-        self.setText(0, f"    \u25b7  {self.type_name}")
-
-    def rename(self, new_name: str):
-        self.type_name = new_name
-        self._refresh()
-
-
-# Leaf node holding one runnable scenario and its full input payload.
-class ScenarioTreeItem(QTreeWidgetItem):
-    """Leaf node: one runnable scenario with its full input data dict."""
-
-    def __init__(self, name: str = "New Scenario", data: dict = None):
-        super().__init__()
-        self.scenario_name = name
-        self.scenario_data: dict = data if data is not None else {}
-        self._refresh()
-
-    def _refresh(self):
-        self.setText(0, f"        \u2014  {self.scenario_name}")
-
-    def rename(self, new_name: str):
-        self.scenario_name = new_name
-        self._refresh()
-
-
-# Left-hand tree widget used to organise projects, scenario types and scenarios.
-class ScenarioTreeWidget(QWidget):
-    """Left-panel hierarchy tree: Project → Scenario Type → Scenario."""
-
-    def __init__(self, lib_type_provider=None, lib_definition_provider=None, composition_provider=None, composition_definition_provider=None, parent=None):
-        super().__init__(parent)
-        self._lib_type_provider = lib_type_provider
-        self._composition_provider = composition_provider
-        self._composition_definition_provider = composition_definition_provider
-        self._lib_definition_provider = lib_definition_provider
-        self._clipboard_scenario: dict = None  # Clipboard for copy/paste
-        self._clipboard_scenario_name: str = None  # Store the original scenario name
-        self.setObjectName("scenarioTreeWidget")
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(420)
-
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-
-        # Header bar
-        header = QWidget()
-        header.setObjectName("scenarioTreeHeader")
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(8, 5, 8, 5)
-        h_layout.setSpacing(4)
-        title_lbl = QLabel("Scenarios")
-        _f = title_lbl.font()
-        _f.setBold(True)
-        _f.setPointSize(10)
-        title_lbl.setFont(_f)
-        add_proj_btn = QPushButton("Add Project")
-        add_proj_btn.setFixedHeight(24)
-        add_proj_btn.setToolTip("Add a new top-level project")
-        add_proj_btn.clicked.connect(lambda: self._add_project())
-        add_sub_section = QPushButton("+")
-        add_sub_section.setFixedHeight(24)
-        add_sub_section.setToolTip("Add a sub-section")
-        add_sub_section.clicked.connect(lambda: self._add_sub_section())
-        h_layout.addWidget(title_lbl)
-        h_layout.addStretch()
-        h_layout.addWidget(add_proj_btn)
-        h_layout.addWidget(add_sub_section)
-        root_layout.addWidget(header)
-
-        # Tree
-        self.tree = QTreeWidget()
-        self.tree.setObjectName("scenarioTreeInner")
-        self.tree.setHeaderHidden(True)
-        self.tree.setColumnCount(1)
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._show_context_menu)
-        self.tree.itemDoubleClicked.connect(self._on_double_click)
-        self.tree.setFocusPolicy(Qt.StrongFocus)
-        root_layout.addWidget(self.tree)
-
-        # Keyboard shortcuts
-        QShortcut(QKeySequence.Copy, self.tree, self._copy_scenario)
-        QShortcut(QKeySequence.Paste, self.tree, self._paste_scenario)
-
-        self._add_project("My Project")
-
-    # ------------------------------------------------------------------
-    # Tree-building actions
-    # ------------------------------------------------------------------
-
-    def _add_project(self, name: str = None):
-        if name is None:
-            name, ok = QInputDialog.getText(self, "New Project", "Project name:")
-            if not ok or not name.strip():
-                return
-            name = name.strip()
-        item = ProjectTreeItem(name)
-        self.tree.addTopLevelItem(item)
-        item.setExpanded(True)
-
-    def _add_scenario_type(self, project_item: ProjectTreeItem): #this lets the user add a scenario types such as the room to separate scenarios per project.
-        name, ok = QInputDialog.getText(self, "New Scenario Type", "Scenario type name:")
-        if not ok or not name.strip():
+        try:
+            time_s, flowrate_lps = self._parse_flowrate_csv(path)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Import Flowrate Dataset", str(exc))
             return
-        child = ScenarioTypeTreeItem(name.strip())
-        project_item.addChild(child)
-        project_item.setExpanded(True)
-        child.setExpanded(True)
 
-    def _add_scenario(self, type_item: ScenarioTypeTreeItem): #lets the user add a scenario to the selected scenario type
-        name, ok = QInputDialog.getText(self, "New Scenario", "Scenario name:")
-        if not ok or not name.strip():
-            return
+        default_name = os.path.splitext(os.path.basename(path))[0]
+        name, accepted = QInputDialog.getText(
+            self, "Import Flowrate Dataset", "Dataset name:", text=default_name)
         name = name.strip()
-        leaf = ScenarioTreeItem(name, data={"Scenario Description": name})
-        type_item.addChild(leaf)
-        type_item.setExpanded(True)
-        self._edit_scenario(leaf)
-
-    def _add_sub_section(self): # this lets the user add either a subsection or scenario depending on which item level is selected.
-        item = self.tree.currentItem()
-        if isinstance(item, ProjectTreeItem):
-            self._add_scenario_type(item)
-        elif isinstance(item, ScenarioTypeTreeItem):
-            self._add_scenario(item)
-        else:
-            QMessageBox.information(self, "Add Sub-section", "Select a project or scenario type to add a sub-section.")
-
-    def _edit_scenario(self, item: ScenarioTreeItem):
-        dlg = ScenarioInputDialog(
-            scenario_name=item.scenario_name,
-            data=item.scenario_data,
-            lib_types=self.get_available_lib_types(),
-            lib_definitions=self.get_custom_lib_definitions(),
-            composition_options=self.get_available_compositions(),
-            composition_definitions=self.get_composition_definitions(),
-            parent=self,
-        )
-        if dlg.exec() == QDialog.Accepted:
-            item.scenario_data = dlg.get_data()
-            desc = item.scenario_data.get("Scenario Description", "").strip()
-            if desc:
-                item.scenario_name = desc
-                item._refresh()
-
-    def _rename_item(self, item):
-        if isinstance(item, ProjectTreeItem):
-            current = item.project_name
-        elif isinstance(item, ScenarioTypeTreeItem):
-            current = item.type_name
-        elif isinstance(item, ScenarioTreeItem):
-            current = item.scenario_name
-        else:
+        if not accepted or not name:
             return
-        new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=current)
-        if ok and new_name.strip():
-            item.rename(new_name.strip())
+        if name in self.base_window.custom_flowrate_profiles or name == NO_FLOWRATE:
+            QMessageBox.warning(self, "Import Flowrate Dataset",
+                                f"A dataset named '{name}' already exists.")
+            return
 
-    def _delete_item(self, item):
-        reply = QMessageBox.question(
-            self, "Delete", f"Delete '{item.text(0).strip()}'?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
-            parent = item.parent()
-            if parent is None:
-                idx = self.tree.indexOfTopLevelItem(item)
-                self.tree.takeTopLevelItem(idx)
-            else:
-                parent.removeChild(item)
+        self.base_window.custom_flowrate_profiles[name] = FlowrateProfile(
+            name=name, time_s=time_s, flowrate_lps=flowrate_lps)
+        self._refresh_lists()
 
-    def _duplicate_scenario(self, item: ScenarioTreeItem):
-        import copy
-        new_item = ScenarioTreeItem(
-            f"{item.scenario_name} (copy)",
-            data=copy.deepcopy(item.scenario_data),
-        )
-        parent = item.parent()
-        if parent:
-            parent.addChild(new_item)
-
-    def _copy_scenario(self):
-        """Copy the selected scenario to the clipboard."""
-        item = self.tree.currentItem()
-        if isinstance(item, ScenarioTreeItem):
-            self._clipboard_scenario = copy.deepcopy(item.scenario_data)
-            self._clipboard_scenario_name = item.scenario_name
-
-    def _paste_scenario(self):
-        """Paste the scenario from clipboard to the selected scenario type."""
-          
-        item = self.tree.currentItem()
-        if isinstance(item, ScenarioTypeTreeItem):
-            # Paste into the selected scenario type
-            new_name, ok = QInputDialog.getText(
-                self, 
-                "Paste Scenario", 
-                "Enter name for pasted scenario:",
-                text=f"{self._clipboard_scenario_name}"
-            )
-            if ok and new_name.strip():
-                new_name = new_name.strip()
-                new_item = ScenarioTreeItem(
-                    new_name,
-                    data=copy.deepcopy(self._clipboard_scenario)
-                )
-                # Update the Scenario Description to match the new name
-                new_item.scenario_data["Scenario Description"] = new_name
-                item.addChild(new_item)
-                item.setExpanded(True)
-
-        elif isinstance(item, ScenarioTreeItem):
-            # If a scenario is selected, use its parent type
-            parent = item.parent()
-            if isinstance(parent, ScenarioTypeTreeItem):
-                new_name, ok = QInputDialog.getText(
-                    self, 
-                    "Paste Scenario", 
-                    "Enter name for pasted scenario:",
-                    text=f"{self._clipboard_scenario_name}"
-                )
-                if ok and new_name.strip():
-                    new_name = new_name.strip()
-                    new_item = ScenarioTreeItem(
-                        new_name,
-                        data=copy.deepcopy(self._clipboard_scenario)
-                    )
-                    # Update the Scenario Description to match the new name
-                    new_item.scenario_data["Scenario Description"] = new_name
-                    parent.addChild(new_item)
-                    parent.setExpanded(True)
-
-        else:
-            QMessageBox.warning(
-                self, 
-                "Cannot Paste", 
-                "Please select a scenario type to paste into."
-            )
-
-    # ------------------------------------------------------------------
-    # Context menu and double-click
-    # ------------------------------------------------------------------
-
-    def _show_context_menu(self, pos):
-        item = self.tree.itemAt(pos)
-        menu = QMenu(self)
-
-        if item is None:
-            menu.addAction("Add Project", lambda: self._add_project())
-        elif isinstance(item, ProjectTreeItem):
-            menu.addAction("Add Scenario Type", lambda: self._add_scenario_type(item))
-            menu.addSeparator()
-            menu.addAction("Rename", lambda: self._rename_item(item))
-            menu.addAction("Delete Project", lambda: self._delete_item(item))
-        elif isinstance(item, ScenarioTypeTreeItem):
-            menu.addAction("Add Scenario", lambda: self._add_scenario(item))
-            menu.addSeparator()
-            if self._clipboard_scenario is not None:
-                menu.addAction("Paste Scenario (Ctrl+V)", lambda: self._paste_scenario())
-                menu.addSeparator()
-            menu.addAction("Rename", lambda: self._rename_item(item))
-            menu.addAction("Delete Type", lambda: self._delete_item(item))
-        elif isinstance(item, ScenarioTreeItem):
-            menu.addAction("Edit Inputs", lambda: self._edit_scenario(item))
-            menu.addAction("Duplicate", lambda: self._duplicate_scenario(item))
-            menu.addSeparator()
-            menu.addAction("Copy Scenario (Ctrl+C)", lambda: self._copy_scenario())
-            if self._clipboard_scenario is not None:
-                menu.addAction("Paste Scenario (Ctrl+V)", lambda: self._paste_scenario())
-            menu.addSeparator()
-            menu.addAction("Rename", lambda: self._rename_item(item))
-            menu.addAction("Delete Scenario", lambda: self._delete_item(item))
-
-        menu.exec(self.tree.viewport().mapToGlobal(pos))
-
-    def _on_double_click(self, item, _column):
-        if isinstance(item, ScenarioTreeItem):
-            self._edit_scenario(item)
-        else:
-            self._rename_item(item)
-
-    # ------------------------------------------------------------------
-    # Data access
-    # ------------------------------------------------------------------
-
-    def collect_all_scenarios(self) -> list:
-        """Return list of data dicts for every ScenarioTreeItem leaf."""
-        scenarios = []
-        root = self.tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            proj = root.child(i)
-            for j in range(proj.childCount()):
-                stype = proj.child(j)
-                for k in range(stype.childCount()):
-                    leaf = stype.child(k)
-                    if isinstance(leaf, ScenarioTreeItem):
-                        scenarios.append(leaf.scenario_data)
-        return scenarios
-
-    def _collect_scenarios_under_item(self, item) -> list:
-        """Return all ScenarioTreeItem data found under *item* (inclusive)."""
-        if item is None:
-            return []
-        if isinstance(item, ScenarioTreeItem):
-            return [item.scenario_data]
-
-        scenarios = []
-        for child_index in range(item.childCount()):
-            child_item = item.child(child_index)
-            scenarios.extend(self._collect_scenarios_under_item(child_item))
-        return scenarios
-
-    def collect_selected_scenarios(self) -> list:
-        """Return scenarios based on current tree selection.
-
-        Selection behavior:
-        - Scenario leaf selected: run only that scenario.
-        - Scenario type selected: run all scenarios within that type.
-        - Project selected: run all scenarios in that project.
-        - Nothing selected: run all scenarios across all projects.
-        """
-        selected_item = self.tree.currentItem()
-        if selected_item is None:
-            return self.collect_all_scenarios()
-
-        selected_scenarios = self._collect_scenarios_under_item(selected_item)
-        if selected_scenarios:
-            return selected_scenarios
-        return self.collect_all_scenarios()
-
-    def get_available_lib_types(self):
-        """Return current LIB type options for scenario dialogs."""
-        if callable(self._lib_type_provider):
-            try:
-                values = list(self._lib_type_provider())
-                if values:
-                    return values
-            except Exception:
-                pass
-        return list(LIB_TYPE)
-
-    def get_custom_lib_definitions(self):
-        """Return custom LIB definitions keyed by LIB Type name."""
-        if callable(self._lib_definition_provider):
-            try:
-                data = self._lib_definition_provider()
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-        return {}
-
-    def get_available_compositions(self):
-        """Return current composition names for scenario dialogs."""
-        if callable(self._composition_provider):
-            try:
-                values = list(self._composition_provider())
-                if values:
-                    return values
-            except Exception:
-                pass
-        return []
-
-    def get_composition_definitions(self):
-        """Return composition definitions keyed by composition title."""
-        if callable(self._composition_definition_provider):
-            try:
-                data = self._composition_definition_provider()
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-        return {}
+    @staticmethod
+    def _parse_flowrate_csv(path):
+        """Read a two-column (time_s, flowrate_lps) CSV, tolerating a header row."""
+        time_s, flowrate_lps = [], []
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [part.strip() for part in line.replace(";", ",").split(",")]
+                try:
+                    t, q = float(parts[0]), float(parts[1])
+                except (ValueError, IndexError):
+                    if line_number == 1:
+                        continue   # header row
+                    raise ValueError(
+                        f"Line {line_number} is not 'time, flowrate': {line!r}") from None
+                time_s.append(t)
+                flowrate_lps.append(q)
+        if len(time_s) < 2:
+            raise ValueError("The file needs at least two 'time, flowrate' rows.")
+        return time_s, flowrate_lps
 
 
 # Main calculation page for LIB toxicity and flammability assessments.
 class LIBPage(QWidget):
-    _CUSTOM_LIB_SCENARIO_KEY_MAP = {
-        "Manufacturer name": ["manufacturer_name", "Manufacturer Name"],
-        "Battery room": ["battery_room", "Battery Room"],
-        "LFL (%)": ["LFL (%)", "lfl_(%)"],
-        "Cell Duration (s)": ["cell_duration_(s)"],
-        "Module Duration (s)": ["module_duration_(s)"],
-        "Venting Temperature (°C)": ["Venting Temperature (°C)", "venting_temperature_(°C)"],
-        "Module Capacity (kWh)": ["module_capacity_(kwh)"],
-        "Cell Volume (L)": ["cell_volume_(l)"],
-        "Module Volume (L)": ["module_volume_(l)"],
-        "Battery Charge (%)": ["Battery Charge (%)"],
-        "CO (%)": ["co_(%)", "Carbon Monoxide (%)"],
-        "CO2 (%)": ["co2_(%)", "Carbon Dioxide (%)", "CO2 (%)"],
-        "H2 (%)": ["h2_(%)", "Hydrogen (%)"],
-        "Total Hydrocarbons (%)": ["total_hydrocarbons_(%)", "Total Hydrocarbons (%)"],
-    }
-
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
-        self._results_summary_widgets: dict = {}
-        self._result_tab_meta: dict = {}
-        self._result_entry_counter = 0
+        self.scenarios = ScenarioStore()   # owns every Scenario; tree items hold only node ids
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -1210,29 +710,21 @@ class LIBPage(QWidget):
         toolbar = QToolBar("LIB Offgassing Calculation Tool")
         toolbar.setMovable(False)
         toolbarcontents = QWidget()
+        toolbarcontents.setObjectName("toolbarContents")
         toolbarlayout = QHBoxLayout()
+        toolbarlayout.setContentsMargins(0, 0, 0, 0)
+        toolbarlayout.setSpacing(6)
         toolbarcontents.setLayout(toolbarlayout)
         toolbar.addWidget(toolbarcontents)
 
-        add_lib = QPushButton("Add LIB")
-        add_lib.setToolTip("Create a custom LIB type from required LIB inputs.")
-        add_lib.clicked.connect(self.open_add_lib_dialog)
+        libraries_button = QPushButton("Libraries")
+        libraries_button.setToolTip("Manage the named objects scenarios reference: batteries (LIBs), "
+                                    "gas compositions and imported flowrate datasets.")
+        libraries_button.clicked.connect(self.open_library_manager)
 
-        edit_lib = QPushButton("Edit LIB")
-        edit_lib.setToolTip("Edit an existing user-defined custom LIB type.")
-        edit_lib.clicked.connect(self.open_edit_lib_dialog)
-
-        add_composition = QPushButton("Add Composition")
-        add_composition.setToolTip("Create a named gas composition from chemical percentages.")
-        add_composition.clicked.connect(self.open_add_composition_dialog)
-
-        flam_calc = QPushButton("Flam Calc")
-        flam_calc.setToolTip("Calculate the flammability assessment for the current scenarios.")
-        flam_calc.clicked.connect(self.run_flam_calc)
-
-        tox_calc = QPushButton("Tox Calc")
-        tox_calc.setToolTip("Calculate the toxicity assessment for the current scenarios.")
-        tox_calc.clicked.connect(self.run_tox_calc)
+        run_button = QPushButton("Run")
+        run_button.setToolTip("Run the selected calculation method for the current scenarios.")
+        run_button.clicked.connect(self.run_calc)
 
         clear_all = QPushButton("Clear All")
         clear_all.setObjectName("clearAllButton")
@@ -1247,17 +739,20 @@ class LIBPage(QWidget):
         results_table.setToolTip("Open the results table builder for the current calculation results.")
         results_table.clicked.connect(self.open_results_table)
 
-        toolbarlayout.addWidget(add_lib)
-        toolbarlayout.addWidget(edit_lib)
-        toolbarlayout.addWidget(add_composition)
+        self.next_result_button = QPushButton("Next Result")
+        self.next_result_button.setToolTip("Switch to the next results tab and show its linked summary.")
+        self.next_result_button.clicked.connect(self.show_next_result)
+        self.next_result_button.setEnabled(False)
+
+        toolbarlayout.addWidget(libraries_button)
         toolbarlayout.addWidget(_make_toolbar_separator())
-        toolbarlayout.addWidget(flam_calc)
-        toolbarlayout.addWidget(tox_calc)
+        toolbarlayout.addWidget(run_button)
         toolbarlayout.addWidget(_make_toolbar_separator())
         toolbarlayout.addWidget(clear_all)
         toolbarlayout.addWidget(export_to_pdf)
         toolbarlayout.addWidget(_make_toolbar_separator())
         toolbarlayout.addWidget(results_table)
+        toolbarlayout.addWidget(self.next_result_button)
         main_layout.addWidget(toolbar)
 
         # --- Body: vertical splitter (middle | bottom summary strip) ---
@@ -1265,30 +760,39 @@ class LIBPage(QWidget):
         body_splitter.setChildrenCollapsible(False)
         main_layout.addWidget(body_splitter)
 
-        # Middle: horizontal splitter (scenario tree | results plot)
+        # Middle: horizontal splitter (study tree | results plot)
         middle_splitter = QSplitter(Qt.Horizontal)
         middle_splitter.setChildrenCollapsible(False)
         body_splitter.addWidget(middle_splitter)
 
-        self.scenario_tree = ScenarioTreeWidget(
-            lib_type_provider=self.get_available_lib_types,
-            lib_definition_provider=self.get_custom_lib_definitions,
-            composition_provider=self.get_available_compositions,
-            composition_definition_provider=self.get_composition_definitions,
-        )
+        self.scenario_tree = self._build_study_tree_panel()
         middle_splitter.addWidget(self.scenario_tree)
         middle_splitter.setStretchFactor(0, 0)
 
-        self.results_tabs = QTabWidget()
-        self.results_tabs.setTabPosition(QTabWidget.North)
-        self.results_tabs.setTabsClosable(True)
-        self.results_tabs.currentChanged.connect(self._on_results_tab_changed)
-        self.results_tabs.tabBarClicked.connect(self._on_results_tab_clicked)
-        self.results_tabs.tabCloseRequested.connect(self._close_result_tab)
-        _ph = QLabel("Run a calculation to view results here.")
-        _ph.setAlignment(Qt.AlignCenter)
-        self.results_tabs.addTab(_ph, "Results")
-        middle_splitter.addWidget(self.results_tabs)
+        self.plot_display = QWidget()
+        self.plot_display.setObjectName("plotDisplay")
+        self.plot_layout = QVBoxLayout(self.plot_display)
+        self.plot_layout.setContentsMargins(16, 16, 16, 16)
+
+        self.plot_placeholder = QLabel(
+            "Plot display area\n\nGenerated calculation plots will appear here."
+        )
+        self.plot_placeholder.setObjectName("plotDisplayPlaceholder")
+        self.plot_placeholder.setAlignment(Qt.AlignCenter)
+
+        # one tab per scenario that has been run; tabs persist across runs
+        self.result_tabs = QTabWidget()
+        self.result_tabs.setTabsClosable(True)
+        self.result_tabs.tabCloseRequested.connect(self._on_result_tab_close_requested)
+        self._result_tab_widgets = {}   # node_id -> that scenario's plot widget
+
+        self.plot_stack = QStackedWidget()
+        self.plot_stack.addWidget(self.plot_placeholder)
+        self.plot_stack.addWidget(self.result_tabs)
+        self.plot_stack.setCurrentWidget(self.plot_placeholder)
+        self.plot_layout.addWidget(self.plot_stack)
+
+        middle_splitter.addWidget(self.plot_display)
         middle_splitter.setStretchFactor(1, 1)
         middle_splitter.setSizes([280, 900])
 
@@ -1299,9 +803,13 @@ class LIBPage(QWidget):
         self.summary_scroll.setMaximumHeight(220)
         self.summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.summary_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        _sph = QLabel("Summary results will appear here after running a calculation.")
-        _sph.setAlignment(Qt.AlignCenter)
-        self.summary_scroll.setWidget(_sph)
+        self.summary_stack = QStackedWidget()
+        self._summary_placeholder = self._summary_placeholder_label(
+            "Summary results will appear here after running a calculation."
+        )
+        self.summary_stack.addWidget(self._summary_placeholder)
+        self.summary_stack.setCurrentWidget(self._summary_placeholder)
+        self.summary_scroll.setWidget(self.summary_stack)
         body_splitter.addWidget(self.summary_scroll)
 
         body_splitter.setSizes([10000, 160])
@@ -1309,728 +817,419 @@ class LIBPage(QWidget):
         body_splitter.setStretchFactor(1, 0)
 
     # ------------------------------------------------------------------
-    # Scenario data — collected from the tree at calc time
+    # Study tree — nodes hold no data of their own, only a NODE_ID_ROLE key
+    # into self.scenarios (node id -> Scenario).
     # ------------------------------------------------------------------
 
-    def get_available_lib_types(self):
-        """Return user-generated LIB type names in stable order."""
-        names = []
-        seen = set()
-        for name in list(self.base_window.custom_lib_definitions.keys()):
-            if name and name not in seen:
-                names.append(name)
-                seen.add(name)
-        return names
+    def _summary_placeholder_label(self, text):
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignCenter)
+        return label
 
-    def get_custom_lib_definitions(self):
-        """Return all custom LIB definitions keyed by LIB Type name."""
-        return dict(getattr(self.base_window, "custom_lib_definitions", {}) or {})
+    def _build_study_tree_panel(self):
+        panel = QWidget()
+        panel.setObjectName("scenarioTreeWidget")
+        panel.setMinimumWidth(260)
+        panel.setMaximumWidth(340)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-    def get_available_compositions(self):
-        """Return user-created composition names in stable order."""
-        names = []
-        seen = set()
-        for name in list(getattr(self.base_window, "custom_composition_definitions", {}).keys()):
-            if name and name not in seen:
-                names.append(name)
-                seen.add(name)
-        return names
+        header = QWidget()
+        header.setObjectName("scenarioTreeHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(8, 6, 8, 6)
+        header_layout.setSpacing(4)
+        header_label = QLabel("Scenarios")
+        header_label.setStyleSheet("font-weight: bold;")
 
-    def get_composition_definitions(self):
-        """Return all composition definitions keyed by composition title."""
-        return dict(getattr(self.base_window, "custom_composition_definitions", {}) or {})
+        add_group_btn = QPushButton("+ Group")
+        add_group_btn.setToolTip("Add a new scenario group to the study tree.")
+        add_group_btn.clicked.connect(self._add_group_node)
 
-    def _apply_custom_lib_to_scenario(self, scenario):
-        """Overlay scenario values from selected custom LIB definition."""
-        if not isinstance(scenario, dict):
-            return scenario
+        add_scenario_btn = QPushButton("+")
+        add_scenario_btn.setToolTip("Add a new scenario, backed by a LIBInputs dataclass, under the selected group.")
+        add_scenario_btn.clicked.connect(self._add_scenario_node)
 
-        output = dict(scenario)
-        selected_lib = str(output.get("LIB Type", "") or "").strip()
-        custom_lib = self.base_window.custom_lib_definitions.get(selected_lib)
-        if not custom_lib:
-            custom_lib = output.get("_custom_lib_data")
-        if not isinstance(custom_lib, dict):
-            return output
+        remove_btn = QPushButton("-")
+        remove_btn.setToolTip("Remove the selected group or scenario from the study tree.")
+        remove_btn.clicked.connect(self._remove_selected_node)
 
-        for src_key, target_keys in self._CUSTOM_LIB_SCENARIO_KEY_MAP.items():
-            value = custom_lib.get(src_key)
-            if value in (None, ""):
-                continue
-            for target_key in target_keys:
-                output[target_key] = value
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.addWidget(add_group_btn, 1)
+        button_layout.addWidget(add_scenario_btn, 1)
+        button_layout.addWidget(remove_btn, 1)
 
-        lib_flowrate_data = custom_lib.get("_flowrate_data")
-        if isinstance(lib_flowrate_data, dict):
-            output["_lib_flowrate_data"] = lib_flowrate_data
-        return output
+        self.scenario_tree_inner = QTreeWidget()
+        self.scenario_tree_inner.setObjectName("scenarioTreeInner")
+        self.scenario_tree_inner.setHeaderHidden(True)
+        self.scenario_tree_inner.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
+        copy_shortcut = QShortcut(QKeySequence.Copy, self.scenario_tree_inner)
+        copy_shortcut.activated.connect(self._copy_selected_scenario)
+        paste_shortcut = QShortcut(QKeySequence.Paste, self.scenario_tree_inner)
+        paste_shortcut.activated.connect(self._paste_copied_scenario)
 
-    def _calculation_scenarios(self):
-        """Return selection-scoped scenarios with custom LIB/composition data merged in."""
-        scenarios = self.scenario_tree.collect_selected_scenarios()
-        merged = [self._apply_custom_lib_to_scenario(s) for s in scenarios]
-        return [self._apply_composition_to_scenario(s) for s in merged]
+        header_layout.addWidget(header_label)
+        header_layout.addLayout(button_layout)
+        layout.addWidget(header)
+        layout.addWidget(self.scenario_tree_inner)
+        return panel
 
-    def _classify_calculation_method(self, scenario, default_method):
-        """Classify a scenario calculation method for routing to the correct engine."""
-        raw_method = str((scenario or {}).get("Calculation Method", default_method) or default_method).strip()
-        normalized = " ".join(raw_method.split()).lower()
+    # ------------------------------------------------------------------
+    # Study tree - pure presentation. Group names/order and scenario membership
+    # live only on self.scenarios (ScenarioStore); every structural edit mutates
+    # the store first and then redraws the tree from it, so the two can't drift.
+    # ------------------------------------------------------------------
 
-        if normalized == "module variable flowrate":
-            return "flowrate"
-        if normalized == "cell propagation":
-            return "cell_propagation"
-        return "standard"
+    def _refresh_tree(self, select_node_id=None, select_group=None):
+        """Rebuild the QTreeWidget from the store, optionally restoring a selection."""
+        self.scenario_tree_inner.clear()
+        for group_name, scenarios in self.scenarios.groups().items():
+            parent_item = QTreeWidgetItem([group_name or "Ungrouped"])
+            parent_item.setData(0, NODE_TYPE_ROLE, NODE_GROUP)
+            self.scenario_tree_inner.addTopLevelItem(parent_item)
+            for scenario in scenarios:
+                item = QTreeWidgetItem([scenario.name])
+                item.setData(0, NODE_TYPE_ROLE, NODE_SCENARIO)
+                item.setData(0, NODE_ID_ROLE, scenario.node_id)
+                parent_item.addChild(item)
+            parent_item.setExpanded(True)
+            if select_group is not None and group_name == select_group:
+                self.scenario_tree_inner.setCurrentItem(parent_item)
+            elif select_node_id is not None:
+                for child_index in range(parent_item.childCount()):
+                    child = parent_item.child(child_index)
+                    if child.data(0, NODE_ID_ROLE) == select_node_id:
+                        self.scenario_tree_inner.setCurrentItem(child)
 
-    def _apply_composition_to_scenario(self, scenario):
-        """Apply gas composition based on the selected Composition Method."""
-        if not isinstance(scenario, dict):
-            return scenario
+    def _add_group_node(self):
+        base_name, count = "New Group", 1
+        name = base_name
+        while name in self.scenarios.group_names:
+            count += 1
+            name = f"{base_name} {count}"
+        self.scenarios.add_group(name)
+        self._refresh_tree(select_group=name)
 
-        output = dict(scenario)
-        composition_method = str(output.get("Composition Method", "") or "").strip()
-        lib_type = str(output.get("LIB Type", "") or "").strip().upper()
+    def _selected_group_name(self):
+        item = self.scenario_tree_inner.currentItem()
+        if item is None:
+            return None
+        if item.data(0, NODE_TYPE_ROLE) == NODE_GROUP:
+            return item.text(0)
+        parent = item.parent()
+        if parent is not None and parent.data(0, NODE_TYPE_ROLE) == NODE_GROUP:
+            return parent.text(0)
+        return None
 
-        if composition_method == "Literature Data":
-            # Resolve the base chemistry (NMC/LFP/LCO) for custom LIBs so that
-            # both flam and tox data come from BATTERY_CHEMISTRY_DATA, not the
-            # custom LIB entry (which stores flam gases as tox_gas_composition).
-            selected_lib_name = str(output.get("LIB Type", "") or "").strip()
-            custom_lib_def = self.base_window.custom_lib_definitions.get(selected_lib_name) or {}
-            base_chemistry = str(custom_lib_def.get("Battery Chemistry", selected_lib_name) or selected_lib_name).upper()
-            base_chem_data = BATTERY_CHEMISTRY_DATA.get(base_chemistry, BATTERY_CHEMISTRY_DATA.get("NMC", {}))
-            flam_comp = base_chem_data.get("flam_gas_composition", {})
-            output.update(flam_comp)
-            output["_flam_percent_override"] = base_chem_data.get("percent_flam", 100.0)
-            output["_tox_gas_composition_override"] = base_chem_data.get("tox_gas_composition", {})
-            output["_percent_tox_override"] = base_chem_data.get("percent_tox", 100.0)
-
-        elif composition_method == "UL9540A Flam Data":
-            # Flam: CO/H2/THC already merged from LIB definition via _apply_custom_lib_to_scenario.
-            # Tox: resolve from base chemistry (NMC/LFP/LCO) so the correct toxic gases are used.
-            selected_lib_name = str(output.get("LIB Type", "") or "").strip()
-            custom_lib_def = self.base_window.custom_lib_definitions.get(selected_lib_name) or {}
-            base_chemistry = str(custom_lib_def.get("Battery Chemistry", selected_lib_name) or selected_lib_name).upper()
-            base_chem_data = BATTERY_CHEMISTRY_DATA.get(base_chemistry, BATTERY_CHEMISTRY_DATA.get("NMC", {}))
-            output["_tox_gas_composition_override"] = base_chem_data.get("tox_gas_composition", {})
-            output["_percent_tox_override"] = base_chem_data.get("percent_tox", 100.0)
-
-            # Flam volumes = total_volume * percent_flam (from chemistry data) * user_gas_percent.
-            # User CO/H2/THC percentages are used directly — not normalised — so each gas
-            # volume is: mod_vol * chemistry_flam_fraction * (user_percent / 100).
-            chemistry_flam_percent = self._to_float(base_chem_data.get("percent_flam"), 0.0)
-            if chemistry_flam_percent > 0:
-                output["_flam_percent_override"] = chemistry_flam_percent
-
-        elif composition_method == "User Defined":
-            selected_comp = str(output.get("Gas Composition", "") or "").strip()
-            comp_data = None
-            if selected_comp and selected_comp != "None":
-                comp_data = getattr(self.base_window, "custom_composition_definitions", {}).get(selected_comp)
-                if not comp_data:
-                    comp_data = output.get("_composition_data")
-
-            if isinstance(comp_data, dict):
-                tox_comp = {}
-                flam_comp = {}
-                for chem_key, val in comp_data.items():
-                    if val in (None, "") or str(val).strip() == "":
-                        continue
-                    try:
-                        float_val = float(str(val))
-                    except (ValueError, TypeError):
-                        continue
-                    if float_val == 0:
-                        continue
-                    chem_props = CHEMICAL_PROPERTIES.get(chem_key, {})
-                    if chem_props.get("toxicity_factor", 0) == 1:
-                        tox_comp[chem_key] = float_val
-                    if chem_props.get("flammability_factor", 0) == 1:
-                        flam_comp[chem_key] = float_val
-
-                if tox_comp:
-                    output["_tox_gas_composition_override"] = tox_comp
-                    # percent_tox = 100 so tox_mod_vol = mod_vol; each gas fraction
-                    # (tox_i/100) then gives volume = total_volume * tox_i/100 directly.
-                    output["_percent_tox_override"] = 100
-
-                if flam_comp:
-                    total_flam_percent = sum(flam_comp.values())
-                    output["_flam_percent_override"] = total_flam_percent
-                    _FLAM_KEY_MAP = {
-                        "co":                 ("co_(%)", "Carbon Monoxide (%)"),
-                        "h2":                 ("h2_(%)", "Hydrogen (%)"),
-                        "total_hydrocarbons": ("total_hydrocarbons_(%)", "Total Hydrocarbons (%)"),
-                    }
-                    if total_flam_percent > 0:
-                        for chem_key, target_keys in _FLAM_KEY_MAP.items():
-                            if chem_key in flam_comp:
-                                split_percent = (flam_comp[chem_key] / total_flam_percent) * 100.0
-                                for t in target_keys:
-                                    output[t] = split_percent
-
-                output["_composition_data"] = comp_data
-
-        else:
-            # Fallback: apply Gas Composition selection (backward compatibility)
-            selected_comp = str(output.get("Gas Composition", "") or "").strip()
-            if selected_comp and selected_comp != "None":
-                comp_data = getattr(self.base_window, "custom_composition_definitions", {}).get(selected_comp)
-                if not comp_data:
-                    comp_data = output.get("_composition_data")
-                if isinstance(comp_data, dict):
-                    _COMP_MAP = {
-                        "co":                 ["Carbon Monoxide (%)", "co_(%)"],
-                        "co2":                ["Carbon Dioxide (%)",  "co2_(%)"],
-                        "h2":                 ["Hydrogen (%)",        "h2_(%)"],
-                        "total_hydrocarbons": ["Total Hydrocarbons (%)", "total_hydrocarbons_(%)"],
-                    }
-                    for chem_key, target_keys in _COMP_MAP.items():
-                        value = comp_data.get(chem_key)
-                        if value in (None, ""):
-                            continue
-                        for target_key in target_keys:
-                            output[target_key] = value
-                    output["_composition_data"] = comp_data
-
-        return output
-
-    @staticmethod
-    def _to_float(value, default=0.0):
-        try:
-            if value in (None, ""):
-                return default
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _build_custom_chemistry(self, lib_type_name, raw_inputs):
-        """Convert popup inputs into chemistry data used by calculations."""
-        co = self._to_float(raw_inputs.get("CO (%)"), 0.0)
-        co2 = self._to_float(raw_inputs.get("CO2 (%)"), 0.0)
-        h2 = self._to_float(raw_inputs.get("H2 (%)"), 0.0)
-        thc = self._to_float(raw_inputs.get("Total Hydrocarbons (%)"), 0.0)
-        battery_chemistry = str(raw_inputs.get("Battery Chemistry", "NMC") or "NMC").upper()
-
-        percent_flam = max(0.0, co + h2 + thc)
-        if percent_flam == 0.0:
-            percent_flam = 100.0
-
-        return {
-            "percent_tox": 100.0,
-            "percent_flam": percent_flam,
-            "specific_capacity": LIB_TYPE_SPECIFIC_CAPACITY.get(battery_chemistry, LIB_TYPE_SPECIFIC_CAPACITY.get("NMC", 458.266894)),
-            "tox_gas_composition": {
-                "co": co,
-                "co2": co2,
-                "h2": h2,
-                "total_hydrocarbons": thc,
-            },
-            "description": f"Custom LIB definition: {lib_type_name}",
-            "reference": "User-defined via Add LIB dialog",
-        }
-
-    def _register_custom_lib(self, lib_type_name, raw_inputs):
-        """Register one custom LIB across UI selection and calculation registries."""
-        if lib_type_name not in LIB_TYPE:
-            LIB_TYPE.append(lib_type_name)
-
-        battery_chemistry = str(raw_inputs.get("Battery Chemistry", "NMC") or "NMC").upper()
-        BATTERY_CHEMISTRY_DATA[lib_type_name.upper()] = self._build_custom_chemistry(lib_type_name, raw_inputs)
-        LIB_TYPE_SPECIFIC_CAPACITY[lib_type_name.upper()] = LIB_TYPE_SPECIFIC_CAPACITY.get(battery_chemistry, LIB_TYPE_SPECIFIC_CAPACITY.get("NMC", 458.266894))
-
-    def sync_custom_lib_registry(self):
-        """Synchronize in-memory custom LIB definitions into runtime registries."""
-        custom_libs = getattr(self.base_window, "custom_lib_definitions", {}) or {}
-        if not isinstance(custom_libs, dict):
+    def _add_scenario_node(self):
+        group_name = self._selected_group_name()
+        if group_name is None:
+            QMessageBox.information(self, "Add Scenario", "Select (or create) a group to add the scenario to.")
             return
 
-        for lib_type_name, raw_inputs in custom_libs.items():
-            if not lib_type_name or not isinstance(raw_inputs, dict):
-                continue
-            self._register_custom_lib(lib_type_name, raw_inputs)
-
-    def open_edit_lib_dialog(self):
-        """Select a user-defined LIB then edit it via a prefilled LIBDefinitionDialog."""
-        custom_libs = self.base_window.custom_lib_definitions
-        if not custom_libs:
-            QMessageBox.information(self, "Edit LIB", "No custom LIBs have been added yet.")
+        dialog = ScenarioInputDialog(self, LIBInputs(), self._composition_names(), self._lib_names(),
+                                     self._flowrate_names())
+        if dialog.exec() != QDialog.Accepted:
             return
 
-        dlg_select = QDialog(self)
-        dlg_select.setWindowTitle("Select LIB to Edit")
-        dlg_select.setMinimumWidth(360)
-        layout = QVBoxLayout(dlg_select)
-        layout.addWidget(QLabel("Select a custom LIB to edit:"))
-        combo = QComboBox()
-        combo.addItems(sorted(custom_libs.keys()))
-        layout.addWidget(combo)
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(dlg_select.accept)
-        btn_box.rejected.connect(dlg_select.reject)
-        layout.addWidget(btn_box)
+        scenario = self.scenarios.add(dialog.result_inputs, group=group_name)
+        self._apply_composition(scenario)
+        self._apply_lib_spec(scenario)
+        self._apply_flowrate_profile(scenario)
+        self._refresh_tree(select_node_id=scenario.node_id)
 
-        if dlg_select.exec() != QDialog.Accepted:
+    def _on_tree_item_double_clicked(self, item, _column):
+        if item.data(0, NODE_TYPE_ROLE) == NODE_GROUP:
+            old_name = item.text(0)
+            group_name, accepted = QInputDialog.getText(
+                self, "Rename Group", "Group name:", text=old_name
+            )
+            group_name = group_name.strip()
+            if not accepted or not group_name or group_name == old_name:
+                return
+            if not self.scenarios.rename_group(old_name, group_name):
+                QMessageBox.warning(self, "Rename Group",
+                                    f"A group named '{group_name}' already exists.")
+                return
+            self._refresh_tree(select_group=group_name)
+            return
+        if item.data(0, NODE_TYPE_ROLE) != NODE_SCENARIO:
+            item.setExpanded(not item.isExpanded())
             return
 
-        selected_name = combo.currentText()
-        raw_inputs = custom_libs.get(selected_name, {})
-
-        prefill = {
-            "lib_type_name": selected_name,
-            "inputs": {k: v for k, v in raw_inputs.items() if not k.startswith("_") and k != "Battery Chemistry"},
-            "Battery Chemistry": raw_inputs.get("Battery Chemistry", "NMC"),
-            "_flowrate_data": raw_inputs.get("_flowrate_data"),
-        }
-
-        dlg = LIBDefinitionDialog(self, prefill=prefill)
-        if dlg.exec() != QDialog.Accepted:
+        node_id = item.data(0, NODE_ID_ROLE)
+        scenario = self.scenarios.get(node_id)
+        if scenario is None:
             return
 
-        payload = dlg.get_payload()
-        new_inputs = dict(payload.get("inputs", {}))
-        new_inputs["Battery Chemistry"] = payload.get("battery_chemistry", "NMC")
-        flowrate_data = payload.get("flowrate_data")
-        if isinstance(flowrate_data, dict):
-            new_inputs["_flowrate_data"] = flowrate_data
-        elif isinstance(raw_inputs.get("_flowrate_data"), dict):
-            new_inputs["_flowrate_data"] = raw_inputs["_flowrate_data"]
+        dialog = ScenarioInputDialog(self, scenario.inputs, self._composition_names(), self._lib_names(),
+                                     self._flowrate_names())
+        if dialog.exec() != QDialog.Accepted:
+            return
 
-        self.base_window.custom_lib_definitions[selected_name] = new_inputs
-        self._register_custom_lib(selected_name, new_inputs)
+        self.scenarios.update_inputs(node_id, dialog.result_inputs)
+        self._apply_composition(scenario)
+        self._apply_lib_spec(scenario)
+        self._apply_flowrate_profile(scenario)
+        self._refresh_tree(select_node_id=node_id)
 
-        QMessageBox.information(
-            self,
-            "Edit LIB",
-            f"Custom LIB '{selected_name}' updated.",
+    def _copy_selected_scenario(self):
+        item = self.scenario_tree_inner.currentItem()
+        if item is None or item.data(0, NODE_TYPE_ROLE) != NODE_SCENARIO:
+            return
+        scenario = self.scenarios.get(item.data(0, NODE_ID_ROLE))
+        if scenario is not None:
+            self._copied_scenario = copy.deepcopy(scenario)
+
+    def _paste_copied_scenario(self):
+        if self._copied_scenario is None:
+            return
+        group_name = self._selected_group_name()
+        if group_name is None:
+            QMessageBox.information(self, "Paste Scenario", "Select a group to paste the scenario into.")
+            return
+
+        inputs = copy.deepcopy(self._copied_scenario.inputs)
+        inputs.scenario_description = f"Copy of {inputs.scenario_description}"
+        scenario = self.scenarios.add(inputs, group=group_name)
+        self._apply_composition(scenario)
+        self._apply_lib_spec(scenario)
+        self._apply_flowrate_profile(scenario)
+        self._refresh_tree(select_node_id=scenario.node_id)
+
+    def _remove_selected_node(self):
+        item = self.scenario_tree_inner.currentItem()
+        if item is None:
+            return
+        if item.data(0, NODE_TYPE_ROLE) == NODE_SCENARIO:
+            node_id = item.data(0, NODE_ID_ROLE)
+            self.scenarios.remove(node_id)
+            self._remove_result_tab(node_id)
+        elif item.data(0, NODE_TYPE_ROLE) == NODE_GROUP:
+            for node_id in self.scenarios.remove_group(item.text(0)):
+                self._remove_result_tab(node_id)
+        self._refresh_tree()
+
+    def _selected_scenario_node_ids(self):
+        """Node ids to run: the selected scenario, every scenario in the selected
+        group, or None (meaning "run everything") if nothing is selected."""
+        item = self.scenario_tree_inner.currentItem()
+        if item is None:
+            return None
+        node_type = item.data(0, NODE_TYPE_ROLE)
+        if node_type == NODE_SCENARIO:
+            return {item.data(0, NODE_ID_ROLE)}
+        if node_type == NODE_GROUP:
+            group_name = item.text(0)
+            return {s.node_id for s in self.scenarios if s.group == group_name}
+        return None
+
+    def _scenarios_in_tree_order(self):
+        """Every scenario in study-tree display order (group by group)."""
+        return self.scenarios.scenarios_in_display_order()
+
+    # ------------------------------------------------------------------
+    # Session save / load — saveload.py handles the JSON, this side handles Qt.
+    # ------------------------------------------------------------------
+
+    def tree_snapshot(self):
+        """[{'name': group, 'scenarios': [Scenario, ...]}, ...] in display order.
+
+        Derived straight from the store - the tree widget holds no state of its own.
+        """
+        return [{"name": name, "scenarios": scenarios}
+                for name, scenarios in self.scenarios.groups().items()]
+
+    def restore_tree(self, groups):
+        """Replace the scenario store from a snapshot and redraw the tree from it.
+
+        Results are not saved to session files, so the results panel starts empty
+        after a load - press Run to recompute them from the restored inputs.
+        """
+        self._clear_result_tabs()
+        self._clear_summary_stack()
+        self.scenarios = ScenarioStore()
+
+        for group in groups or []:
+            group_name = group.get("name") or "New Group"
+            self.scenarios.add_group(group_name)
+            for scenario in group.get("scenarios") or []:
+                scenario.group = group_name
+                self.scenarios.scenarios[scenario.node_id] = scenario
+                self.scenarios._counter = max(self.scenarios._counter, scenario.node_id)
+                self._apply_composition(scenario)
+                self._apply_lib_spec(scenario)
+                self._apply_flowrate_profile(scenario)
+
+        self._refresh_tree()
+
+    # ------------------------------------------------------------------
+    # Gas compositions
+    # ------------------------------------------------------------------
+
+    def _composition_names(self):
+        return [NO_COMPOSITION] + list(self.base_window.custom_composition_definitions)
+
+    def _apply_composition(self, scenario):
+        """Bind the GasComposition named on the scenario's inputs to the Scenario."""
+        scenario.gas_composition = self.base_window.custom_composition_definitions.get(
+            scenario.inputs.gas_composition
         )
 
-    def open_add_lib_dialog(self):
-        """Collect custom LIB inputs and register a selectable LIB type."""
-        dlg = LIBDefinitionDialog(self)
-        if dlg.exec() != QDialog.Accepted:
-            return
+    # ------------------------------------------------------------------
+    # Battery (LIB) definitions
+    # ------------------------------------------------------------------
 
-        payload = dlg.get_payload()
-        lib_type_name = payload.get("lib_type_name", "").strip()
-        raw_inputs = payload.get("inputs", {})
-        flowrate_data = payload.get("flowrate_data")
-        battery_chemistry = payload.get("battery_chemistry", "NMC")
+    def _lib_names(self):
+        return [NO_LIB] + list(self.base_window.custom_lib_definitions)
 
-        if not lib_type_name:
-            QMessageBox.warning(self, "Add LIB", "LIB Type Name is required.")
-            return
+    def _apply_lib_spec(self, scenario):
+        """Bind the LIBSpec named on the scenario's inputs to the Scenario."""
+        scenario.lib_spec = self.base_window.custom_lib_definitions.get(scenario.inputs.lib_spec)
 
-        if lib_type_name in self.base_window.custom_lib_definitions or lib_type_name in LIB_TYPE:
-            QMessageBox.warning(self, "Add LIB", f"'{lib_type_name}' already exists.")
-            return
+    # ------------------------------------------------------------------
+    # Flowrate datasets
+    # ------------------------------------------------------------------
 
-        raw_inputs = dict(raw_inputs)
-        raw_inputs["Battery Chemistry"] = battery_chemistry
-        if isinstance(flowrate_data, dict):
-            raw_inputs["_flowrate_data"] = flowrate_data
+    def _flowrate_names(self):
+        return [NO_FLOWRATE] + list(self.base_window.custom_flowrate_profiles)
 
-        self.base_window.custom_lib_definitions[lib_type_name] = raw_inputs
-        self._register_custom_lib(lib_type_name, raw_inputs)
-
-        QMessageBox.information(
-            self,
-            "Add LIB",
-            f"Custom LIB '{lib_type_name}' saved. It is now available in scenario LIB Type selection.",
+    def _apply_flowrate_profile(self, scenario):
+        """Bind the FlowrateProfile named on the scenario's inputs to the Scenario."""
+        scenario.flowrate_profile = self.base_window.custom_flowrate_profiles.get(
+            scenario.inputs.flowrate_profile
         )
-
-    def open_add_composition_dialog(self):
-        """Collect gas composition inputs and store a named composition."""
-        dlg = CompositionDefinitionDialog(self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        payload = dlg.get_payload()
-        comp_title = payload.get("composition_title", "").strip()
-        chemicals = payload.get("chemicals", {})
-
-        if not comp_title:
-            QMessageBox.warning(self, "Add Composition", "Composition Title is required.")
-            return
-
-        existing = getattr(self.base_window, "custom_composition_definitions", {})
-        if comp_title in existing:
-            QMessageBox.warning(self, "Add Composition", f"'{comp_title}' already exists.")
-            return
-
-        self.base_window.custom_composition_definitions[comp_title] = chemicals
-
-        QMessageBox.information(
-            self,
-            "Add Composition",
-            f"Composition '{comp_title}' saved. It is now available in scenario Gas Composition selection.",
-        )
-
-    @staticmethod
-    def _scenario_dtype():
-        return np.dtype([(h, 'U100') if is_string_field(h) else (h, 'f8') for h in COMBINED_INPUTS])
-
-    def current_scenario_data(self):
-        """Build a numpy structured array from all ScenarioTreeItem leaves."""
-        dicts = self.scenario_tree.collect_all_scenarios()
-        if not dicts:
-            return np.zeros(0, dtype=self._scenario_dtype())
-
-        dtype = self._scenario_dtype()
-        result = np.zeros(len(dicts), dtype=dtype)
-        for i, data in enumerate(dicts):
-            for field in COMBINED_INPUTS:
-                val = data.get(field, "")
-                if is_string_field(field):
-                    result[field][i] = str(val) if val else ""
-                else:
-                    try:
-                        result[field][i] = float(val) if val not in ("", None) else np.nan
-                    except (ValueError, TypeError):
-                        result[field][i] = np.nan
-        return result
 
     # ------------------------------------------------------------------
     # Results panel
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _summary_placeholder_label(text: str):
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
-        return label
-
-    def _show_summary_placeholder(self, text: str):
-        if not hasattr(self, "summary_scroll"):
-            return
-        self.summary_scroll.setWidget(self._summary_placeholder_label(text))
-
-    def _on_results_tab_clicked(self, index: int):
-        self._on_results_tab_changed(index)
-
-    def _on_results_tab_changed(self, index: int):
-        if not hasattr(self, "summary_scroll"):
-            return
-        tab_widget = self.results_tabs.widget(index) if index >= 0 else None
-        summary_w = self._results_summary_widgets.get(tab_widget)
-        if summary_w is not None:
-            self.summary_scroll.setWidget(summary_w)
-        else:
-            self._show_summary_placeholder("Summary results will appear here after running a calculation.")
-
-    def _ensure_results_placeholder(self):
-        if self.results_tabs.count() > 0:
-            return
-        ph = QLabel("Run a calculation to view results here.")
-        ph.setAlignment(Qt.AlignCenter)
-        self.results_tabs.addTab(ph, "Results")
-        self._show_summary_placeholder("Summary results will appear here after running a calculation.")
-
-    def _remove_results_placeholder(self):
-        if self.results_tabs.count() != 1:
-            return
-        placeholder = self.results_tabs.widget(0)
-        if placeholder is None:
-            return
-        if placeholder in self._result_tab_meta:
-            return
-        self.results_tabs.removeTab(0)
-        placeholder.deleteLater()
-
-    def _build_result_tab_title(self, scenario_name: str, result_type: str) -> str:
-        suffix = "tox" if result_type == "tox" else "flam"
-        return f"{scenario_name} ({suffix})"
-
-    def _add_result_tab(self, result_type: str, scenario_name: str, result_data: dict):
-        import display_popup as _dp
-
-        if result_type == "tox":
-            df = result_data.get("tox_vv_df")
-        else:
-            df = result_data.get("flam_vv_df")
-        if df is None or df.empty:
-            return
-
-        self._remove_results_placeholder()
-
-        tab_scroll = QScrollArea()
-        tab_scroll.setWidgetResizable(True)
-        tab_inner = QWidget()
-        QVBoxLayout(tab_inner)
-        tab_scroll.setWidget(tab_inner)
-
-        if result_type == "flam":
-            _dp.render_flam_scenario_into(tab_inner, scenario_name, result_data, CHEMICAL_PROPERTIES)
-            headers = result_data.get("flam_summary_headers", [])
-            row_data = result_data.get("flam_summary_row_data", [])
-            groups = result_data.get("flam_summary_groups", [("Scenario Info", 6), ("Peak Results", 4)])
-        else:
-            _tox_mgl_df = result_data.get("tox_mgl_df")
-            if _tox_mgl_df is not None:
-                tox_gas_labels = [
-                    col.replace(" (mg/L)", "")
-                    for col in _tox_mgl_df.columns
-                    if col not in ("Time (s)", "Total Gas (mg/L)")
-                ]
-            else:
-                tox_gas_labels = list(CHEMICAL_PROPERTIES.keys())
-            _dp.render_tox_scenario_into(tab_inner, scenario_name, result_data, tox_gas_labels, CHEMICAL_PROPERTIES)
-            headers = result_data.get("tox_summary_headers", [])
-            row_data = result_data.get("tox_summary_row_data", [])
-            groups = result_data.get("tox_summary_groups", [("Scenario Info", 5), ("Peak Totals", 2)])
-
-        summary_w = (
-            _dp._build_summary_table(headers, row_data, groups)
-            if headers and row_data
-            else QLabel(f"Summary for {scenario_name}")
-        )
-
-        self._result_entry_counter += 1
-        result_key = f"{result_type}:{self._result_entry_counter}:{scenario_name}"
-        target_dict_name = "tox_scenario_results" if result_type == "tox" else "flam_scenario_results"
-        target_dict = getattr(self.base_window, target_dict_name)
-        target_dict[result_key] = result_data
-
-        tab_title = self._build_result_tab_title(scenario_name, result_type)
-        self.results_tabs.addTab(tab_scroll, tab_title)
-        self._results_summary_widgets[tab_scroll] = summary_w
-        self._result_tab_meta[tab_scroll] = {
-            "result_type": result_type,
-            "result_key": result_key,
-            "scenario_name": scenario_name,
-        }
-        self.results_tabs.setCurrentWidget(tab_scroll)
-        self._on_results_tab_changed(self.results_tabs.currentIndex())
-
-    def _close_result_tab(self, index: int):
-        tab_widget = self.results_tabs.widget(index)
-        if tab_widget is None:
-            return
-
-        tab_meta = self._result_tab_meta.pop(tab_widget, None)
-        if tab_meta is None:
-            return
-
-        summary_w = self._results_summary_widgets.pop(tab_widget, None)
-        result_type = tab_meta.get("result_type")
-        result_key = tab_meta.get("result_key")
-        if result_type == "tox":
-            self.base_window.tox_scenario_results.pop(result_key, None)
-        elif result_type == "flam":
-            self.base_window.flam_scenario_results.pop(result_key, None)
-
-        self.results_tabs.removeTab(index)
-        tab_widget.deleteLater()
-        if summary_w is not None:
-            summary_w.deleteLater()
-
-        self._ensure_results_placeholder()
-        self._on_results_tab_changed(self.results_tabs.currentIndex())
-
-    def _update_results_display(self, result_type: str):
-        import display_popup as _dp
-
-        while self.results_tabs.count() > 0:
-            w = self.results_tabs.widget(0)
-            self.results_tabs.removeTab(0)
-            if w:
-                w.deleteLater()
-        self._results_summary_widgets.clear()
-        self._result_tab_meta.clear()
-
-        all_entries = []
-        for key, result_data in (self.base_window.tox_scenario_results or {}).items():
-            if isinstance(result_data, dict):
-                scenario_name = str(result_data.get("input", {}).get("Scenario Description") or key)
-                all_entries.append(("tox", key, scenario_name, result_data))
-        for key, result_data in (self.base_window.flam_scenario_results or {}).items():
-            if isinstance(result_data, dict):
-                scenario_name = str(result_data.get("input", {}).get("Scenario Description") or key)
-                all_entries.append(("flam", key, scenario_name, result_data))
-
-        for result_type_name, result_key, scenario_name, result_data in all_entries:
-            tab_scroll = QScrollArea()
-            tab_scroll.setWidgetResizable(True)
-            tab_inner = QWidget()
-            QVBoxLayout(tab_inner)
-            tab_scroll.setWidget(tab_inner)
-
-            if result_type_name == "tox":
-                _dp.render_tox_scenario_into(tab_inner, scenario_name, result_data,
-                                             list(CHEMICAL_PROPERTIES.keys()), CHEMICAL_PROPERTIES)
-                hdrs = result_data.get("tox_summary_headers", [])
-                rdata = result_data.get("tox_summary_row_data", [])
-                grps = result_data.get("tox_summary_groups", [("Scenario Info", 5), ("Peak Totals", 2)])
-            else:
-                _dp.render_flam_scenario_into(tab_inner, scenario_name, result_data, CHEMICAL_PROPERTIES)
-                hdrs = result_data.get("flam_summary_headers", [])
-                rdata = result_data.get("flam_summary_row_data", [])
-                grps = result_data.get("flam_summary_groups", [("Scenario Info", 6), ("Peak Results", 4)])
-
-            self.results_tabs.addTab(tab_scroll, self._build_result_tab_title(scenario_name, result_type_name))
-            self._results_summary_widgets[tab_scroll] = (
-                _dp._build_summary_table(hdrs, rdata, grps) if hdrs and rdata
-                else QLabel(f"Summary for {scenario_name}")
-            )
-            self._result_tab_meta[tab_scroll] = {
-                "result_type": result_type_name,
-                "result_key": result_key,
-                "scenario_name": scenario_name,
-            }
-
-        self._ensure_results_placeholder()
-        self._on_results_tab_changed(self.results_tabs.currentIndex())
-
-    # ------------------------------------------------------------------
-    # Calculations
-    # ------------------------------------------------------------------
-
-    def run_tox_calc(self):
-        scenario_data = self._calculation_scenarios()
-        missing = [s.get("Scenario Description", "(unnamed)") for s in scenario_data if str(s.get("LIB Type", "")).strip() == "Missing LIB"]
-        if missing:
-            QMessageBox.warning(self, "Missing LIB", "The following scenarios have no LIB assigned:\n" + "\n".join(f"  • {n}" for n in missing) + "\n\nAssign a LIB via Edit Scenario before running calculations.")
-            return
-
-        cell_prop_scenarios = []
-        standard_scenarios = []
-        default_method = CALCULATION_METHODS[0]
-        for scenario in scenario_data:
-            method_bucket = self._classify_calculation_method(scenario, default_method)
-            if method_bucket == "cell_propagation":
-                cell_prop_scenarios.append(scenario)
-            else:
-                standard_scenarios.append(scenario)
-
-        temp_state = SimpleNamespace(
-            tox_scenario_results={},
-            cell_scenario_results={},
-            selected_calc_method=self.base_window.selected_calc_method,
-            use_le_chatelier_lfl=self.base_window.use_le_chatelier_lfl,
-            use_temp_dependent_lfl=self.base_window.use_temp_dependent_lfl,
-        )
-        _noop = lambda *a, **kw: None
-
-        if standard_scenarios:
-            toxicity_assessment_calc(
-                self.base_window,
-                state=temp_state,
-                display_toxicity_result_popup=_noop,
-                gas_data=CHEMICAL_PROPERTIES,
-                scenario_data=standard_scenarios,
-                clear_existing=True,
-            )
-
-        if cell_prop_scenarios:
-            cell_venting_assessment_calc(
-                self.base_window,
-                state=temp_state,
-                gas_data=CHEMICAL_PROPERTIES,
-                scenario_data=cell_prop_scenarios,
-                clear_existing=False,
-            )
-
-        for scenario_name, result_data in temp_state.tox_scenario_results.items():
-            self._add_result_tab("tox", scenario_name, result_data)
-        for scenario_name, result_data in temp_state.cell_scenario_results.items():
-            self._add_result_tab("tox", scenario_name, result_data)
-
-    def run_flam_calc(self):
-        scenario_data = self._calculation_scenarios()
-        missing = [s.get("Scenario Description", "(unnamed)") for s in scenario_data if str(s.get("LIB Type", "")).strip() == "Missing LIB"]
-        if missing:
-            QMessageBox.warning(self, "Missing LIB", "The following scenarios have no LIB assigned:\n" + "\n".join(f"  • {n}" for n in missing) + "\n\nAssign a LIB via Edit Scenario before running calculations.")
-            return
-        standard_scenarios = []
-        flowrate_scenarios = []
-        cell_prop_scenarios = []
-        default_method = CALCULATION_METHODS[0]
-        for scenario in scenario_data:
-            method_bucket = self._classify_calculation_method(scenario, default_method)
-            if method_bucket == "flowrate":
-                flowrate_scenarios.append(scenario)
-            elif method_bucket == "cell_propagation":
-                cell_prop_scenarios.append(scenario)
-            else:
-                standard_scenarios.append(scenario)
-
-        temp_state = SimpleNamespace(
-            flam_scenario_results={},
-            cell_scenario_results={},
-            selected_calc_method=self.base_window.selected_calc_method,
-            use_le_chatelier_lfl=self.base_window.use_le_chatelier_lfl,
-            use_temp_dependent_lfl=self.base_window.use_temp_dependent_lfl,
-            gas_flowrate_data=self.base_window.gas_flowrate_data,
-        )
-        _noop = lambda *a, **kw: None
-
-        if standard_scenarios:
-            flammability_assessment_calc(
-                self.base_window,
-                state=temp_state,
-                display_flammability_result_popup=_noop,
-                gas_data=CHEMICAL_PROPERTIES,
-                bat_data=BATTERY_CHEMISTRY_DATA,
-                flam_gasses_labels=list(FLAMMABLE_GASES),
-                scenario_data=standard_scenarios,
-                clear_existing=True,
-            )
-
-        if flowrate_scenarios:
-            flammability_assessment_calc_graphical_method(
-                self.base_window,
-                state=temp_state,
-                display_flammability_result_popup=_noop,
-                gas_data=CHEMICAL_PROPERTIES,
-                bat_data=BATTERY_CHEMISTRY_DATA,
-                flam_gasses_labels=list(FLAMMABLE_GASES),
-                scenario_data=flowrate_scenarios,
-                clear_existing=False,
-            )
-
-        if cell_prop_scenarios:
-            cell_venting_assessment_calc(
-                self.base_window,
-                state=temp_state,
-                gas_data=CHEMICAL_PROPERTIES,
-                scenario_data=cell_prop_scenarios,
-                clear_existing=False,
-            )
-
-        for scenario_name, result_data in temp_state.flam_scenario_results.items():
-            self._add_result_tab("flam", scenario_name, result_data)
-        for scenario_name, result_data in temp_state.cell_scenario_results.items():
-            self._add_result_tab("flam", scenario_name, result_data)
-
-    # ------------------------------------------------------------------
-    # Other toolbar actions
-    # ------------------------------------------------------------------
+    def _show_summary(self, text):
+        label = self._summary_placeholder_label(text)
+        self.summary_stack.addWidget(label)
+        self.summary_stack.setCurrentWidget(label)
 
     def clear_results(self):
-        self.base_window.tox_scenario_results.clear()
-        self.base_window.flam_scenario_results.clear()
-        while self.results_tabs.count() > 0:
-            tab_widget = self.results_tabs.widget(0)
-            self.results_tabs.removeTab(0)
-            if tab_widget:
-                tab_widget.deleteLater()
-        self._results_summary_widgets.clear()
-        self._result_tab_meta.clear()
-        self._ensure_results_placeholder()
+        self.scenarios.clear_results()
+        self._clear_summary_stack()
+        self._clear_result_tabs()
+
+    def _clear_summary_stack(self):
+        while self.summary_stack.count() > 1:
+            widget = self.summary_stack.widget(1)
+            self.summary_stack.removeWidget(widget)
+            widget.deleteLater()
+        self.summary_stack.setCurrentWidget(self._summary_placeholder)
+
+    def _show_result_summary(self, title):
+        """Render the summary strip from every scenario's stored ResultSummary."""
+        summaries = [s.summary for s in self._scenarios_in_tree_order() if s.summary is not None]
+        if not summaries:
+            self._show_summary(f"{title}: no results were produced.")
+            return
+        blocks = ["\n".join(summary.summary_lines()) for summary in summaries]
+        self._show_summary("\n\n".join(blocks))
+
+    def run_calc(self):
+        from venting_calculation import run_venting_assessment, build_result_plots
+
+        if not len(self.scenarios):
+            QMessageBox.information(self, "Run", "Add at least one scenario first.")
+            return
+        node_ids = self._selected_scenario_node_ids()
+        if node_ids is not None and not node_ids:
+            QMessageBox.information(self, "Run", "The selected group has no scenarios.")
+            return
+
+        # One engine for every calculation method: each scenario's inputs.calc_method
+        # selects its release model inside run_venting_assessment (see
+        # venting_calculation.build_module_release). Scenarios outside node_ids keep
+        # their stored results untouched.
+        results = run_venting_assessment(self, self.scenarios, CHEMICAL_PROPERTIES,
+                                         node_ids=node_ids)
+
+        self._show_result_summary("Calculation Results")
+
+        for node_id in results:
+            scenario = self.scenarios.get(node_id)
+            if scenario is not None and scenario.summary is not None:
+                self._set_result_tab(node_id, scenario.name,
+                                     build_result_plots(scenario.summary))
+
+    def _set_result_tab(self, node_id, label, widget):
+        """Add the scenario's plot tab, replacing its previous one if it was run before."""
+        previous = self._result_tab_widgets.pop(node_id, None)
+        if previous is not None:
+            index = self.result_tabs.indexOf(previous)
+            if index != -1:
+                self.result_tabs.removeTab(index)
+            previous.deleteLater()
+
+        self._result_tab_widgets[node_id] = widget
+        self.result_tabs.setCurrentIndex(self.result_tabs.addTab(widget, label))
+        self.plot_stack.setCurrentWidget(self.result_tabs)
+
+    def _clear_result_tabs(self):
+        while self.result_tabs.count():
+            widget = self.result_tabs.widget(0)
+            self.result_tabs.removeTab(0)
+            widget.deleteLater()
+        self._result_tab_widgets.clear()
+        self.plot_stack.setCurrentWidget(self.plot_placeholder)
+
+    def _remove_result_tab(self, node_id):
+        widget = self._result_tab_widgets.pop(node_id, None)
+        if widget is None:
+            return
+        index = self.result_tabs.indexOf(widget)
+        if index != -1:
+            self.result_tabs.removeTab(index)
+        widget.deleteLater()
+        if not self.result_tabs.count():
+            self.plot_stack.setCurrentWidget(self.plot_placeholder)
+
+    def _on_result_tab_close_requested(self, index):
+        """Close (x) on a result tab: drop the scenario's stored result so it
+        stops appearing in the summary strip and is not included in any export."""
+        widget = self.result_tabs.widget(index)
+        node_id = next((nid for nid, w in self._result_tab_widgets.items() if w is widget), None)
+        if node_id is None:
+            return
+        scenario = self.scenarios.get(node_id)
+        if scenario is not None:
+            scenario.result = None
+            scenario.summary = None
+        self._remove_result_tab(node_id)
+        self._show_result_summary("Calculation Results")
+
 
     def export_current_sheet_pdf(self):
-        exported_path = pdf_generation(
-            tox_scenario_results=self.base_window.tox_scenario_results,
-            flam_scenario_results=self.base_window.flam_scenario_results,
-            title="Battery Off-gas Assessment Results",
-            gas_data=CHEMICAL_PROPERTIES,
-        )
-        if exported_path:
-            QMessageBox.information(self, "PDF Export Complete",
-                                    f"PDF report exported successfully:\n{exported_path}")
+        from pdf import export_lib_report_pdf
+        export_lib_report_pdf(self, self._scenarios_in_tree_order())
 
     def open_results_table(self):
-        open_results_table_window(self.base_window, self.base_window)
+        from resultstable import open_results_table
+
+        scenarios = [s for s in self._scenarios_in_tree_order() if s.summary is not None]
+        if not scenarios:
+            QMessageBox.information(self, "Results Table",
+                                    "No scenarios have results yet - press Run first.")
+            return
+        open_results_table(self, scenarios)
+
+    def show_next_result(self):
+        pass
+
+    def open_library_manager(self):
+        dialog = LibraryManagerDialog(self, self.base_window)
+        dialog.exec()
+        # library objects may have been renamed/deleted - rebind every scenario by name
+        for scenario in self.scenarios:
+            self._apply_composition(scenario)
+            self._apply_lib_spec(scenario)
+            self._apply_flowrate_profile(scenario)
 
 
 # Page for calculating sprinkler activation times from the supplied inputs.
@@ -2048,9 +1247,10 @@ class SprinklerPage(QWidget):
         toolbar = QToolBar("Sprinkler Activation Time Calculator")
         toolbar.setMovable(False)
         toolbarcontents = QWidget()
+        toolbarcontents.setObjectName("toolbarContents")
         toolbarlayout = QHBoxLayout()
-        toolbarlayout.setContentsMargins(8, 4, 8, 4)
-        toolbarlayout.setSpacing(8)
+        toolbarlayout.setContentsMargins(0, 0, 0, 0)
+        toolbarlayout.setSpacing(6)
         toolbarcontents.setLayout(toolbarlayout)
         toolbar.addWidget(toolbarcontents)
 
@@ -2274,53 +1474,53 @@ class TutorialPage(QWidget):
             {
                 "icon": "🚀",
                 "title": "Getting Started",
-                "content": "Welcome to the Battery Off-gassing Calculation Tool! This application helps you assess toxicity and flammability risks from lithium-ion battery thermal runaway events."
+                "content": "Welcome to the Battery Off-gassing Calculation Tool! This application helps you assess toxicity and flammability risks from lithium-ion battery thermal runaway events.\nThe basic workflow is: define your batteries in Libraries, build scenarios in the study tree, press Run, then review the plots and summary before exporting a PDF report."
+            },
+            {
+                "icon": "📚",
+                "title": "Libraries",
+                "content": "The 'Libraries' button manages the three kinds of named objects scenarios reference:\n• Batteries (LIB): the cell/module volumes, durations, LFL and propagation behaviour of one battery product\n• Gas Compositions: a named percentage split of the off-gas into chemical species\n• Flowrate Datasets: measured module flowrate curves imported from CSV\nDefine an object once, then any number of scenarios can select it by name. Editing a library object updates every scenario that references it."
             },
             {
                 "icon": "📝",
                 "title": "Creating Scenarios",
-                "content": "1. Fill in the input parameters in the text boxes\n2. Select a battery type from the dropdown menu\n3. Press 'Enter Scenario' to add it to the queue\n4. Battery types are NMC, LFP1, and LFP2\n5. Cell temperatures and cell volumes are not used in calculations\nTip: Use presets for quick setup of common scenarios."
-            },
-            {
-                "icon": "📁",
-                "title": "Batch Import",
-                "content": "For multiple scenarios:\n1. Click 'Generate Template' to create an Excel file\n2. Fill in your scenarios in the template\n3. Use 'Load Data File' to import all scenarios at once\n\nNote: Ensure a battery type is selected before loading."
+                "content": "1. Press '+ Group' to create a group (e.g. a design option or room)\n2. With the group selected, press '+' to add a scenario\n3. Fill in the scenario dialog: pick the battery, counts, room details and the Calculation Method\n4. Double-click a scenario to edit it, or a group to rename it\n5. Ctrl+C / Ctrl+V copies and pastes scenarios between groups"
             },
             {
                 "icon": "🧪",
                 "title": "Running Calculations",
-                "content": "Choose your assessment type:\n\n• Calc Toxicity: Analyzes toxic gas concentrations (CO, NO₂, HCl, HF, HCN, Benzene, Toluene)\n• Calc Explosive: Evaluates flammable gas mixtures (CO, H₂, Hydrocarbons)\n\nResults appear in a popup window with graphs and summary tables."
+                "content": "Press Run to calculate. The selection controls the scope: a selected scenario runs alone, a selected group runs its scenarios, and no selection runs everything.\nEvery scenario runs through the same pipeline; only its Calculation Method changes how one module releases gas:\n• Cell Volume UL9540A: cells inside each module initiate in staggered waves, each following an empirical release curve (or a flat rate if a measured Cell Duration is entered)\n• Module Volume UL9540A: each module releases its UL9540A test volume at a constant rate\n• Module Capacity: the volume comes from literature specific-capacity data (L/kWh) times the module capacity\n• Module Variable Flowrate: each module replays an imported measured flowrate dataset\nModules always initiate in staggered waves set by the battery's module propagation delay and number."
             },
             {
                 "icon": "📊",
-                "title": "Exporting Results",
-                "content": "Click 'Export PDF Report' to generate a comprehensive document including:\n• Input parameters for all scenarios\n• Concentration graphs over time\n• Summary tables and peak values\n• Maximum allowable units calculations"
+                "title": "Results",
+                "content": "Each run adds one tab per scenario with a Flammable Gas and a Toxic Gas plot; checkboxes toggle individual species and their threshold lines (per-species LFLs, ERPG-3).\nThe strip along the bottom summarises every stored result: peak flammable concentration, the assessment LFL and when (or whether) it is reached, and each toxic species' peak.\nClosing a tab discards that scenario's stored result. 'Clear All' discards everything."
             },
             {
-                "icon": "⚙️",
-                "title": "Technical Notes",
-                "content": "• All parameters are based on module-level test data\n• Toxic gas composition: From DNV-GL empirical data\n• Flammable gas data: Specified in battery data files\n• Battery data stored in zip files in the battery_data folder\n• Results consider thermal propagation between modules"
+                "icon": "📄",
+                "title": "Exporting Reports",
+                "content": "Click 'Export PDF Report' to generate a document with an intro/assumptions page, a contents page, and per scenario: the exact inputs and battery specification the run used, landscape concentration plots, and summary tables of peaks against LFL and ERPG-3 thresholds.\nOnly scenarios with stored results can be exported, and you choose which to include."
             },
             {
-                "icon": "🧹",
-                "title": "Managing Scenarios",
-                "content": "• Clear Form: Resets input fields\n• Delete Selected: Removes chosen scenarios from queue\n• Clear All: Removes all scenarios and calculation results"
-            },
-            {
-                "icon": "💡",
-                "title": "Tips",
-                "content": "This program can either determine the volume off gassing through the UL9540A test results or the module capacity with a L/kWh value based on literature data.\nIf the capacity of a module is greater than 1, the model deviates too much so we default to using UL9540A cell volumes.\nA total volume is calculated and a percentage of that is used as either the flammable or toxic gas volume based on literature data. e.g. 80 percent flammable gas and 30 percent toxic gas as some gasses are counted as both flammable and toxic.\nAll correlations are based on 60 peer reviewed papers containing data for a total of 470 LIB experiments"
+                "icon": "💾",
+                "title": "Saving Sessions",
+                "content": "File > Save Session stores the whole program state - libraries, the study tree and every scenario's inputs - in a .libsave file. Calculation results are deliberately not saved: they are cheap to recompute, so simply press Run after opening a session."
             },
             {
                 "icon": "🚨",
                 "title": "Emergency Ventilation",
-                "content": "Vent Switch Conc and Emergency Vent Rate are inputs that allow users to use two ventilation rates in one scenario. To deactivate this system, input 0 for both inputs.\nVent Switch Conc is the percentage of the room that must be reached to activate the emergency ventliation. i.e. if LEL is 4% then activate emergency vent at 4%.\nEmergency vent is typically higher than the standard ventilation rate."
+                "content": "Vent Switch Concentration and Emergency Vent Rate let one scenario use two ventilation rates. Set both to 0 to disable the system.\nVent Switch Concentration is the room's CO concentration, as a percentage of CO's own LFL, at which the ventilation switches to the emergency rate - e.g. 25 switches when CO reaches 25% of its LFL. The switch is not latched: if CO falls back below the trigger the standard rate resumes.\nBoth rates are entered in L/s per m2 of room floor area; the emergency rate is typically higher than the standard rate."
             },
             {
                 "icon": "🔄",
                 "title": "Variable Flowrates",
-                "content": "Module level UL9540A test reports often provide flowrate data in graphs. Using WebPlotDigitizer you can extract the flowrate data into a csv file ascending in the x asis and import it to this program to use. \nYou need to select from the drop down menu the correct calculation function (module variable flowrate), opt to use a calculated LFL if you want, import the data, then import the scenarios from excel and run the calc. This is still a WIP."
-            }
+                "content": "Module level UL9540A test reports often provide flowrate data as graphs. Using WebPlotDigitizer you can extract the curve into a two-column CSV (time in seconds, flowrate in L/s) and import it under Libraries > Flowrate Datasets.\nThen select the 'Module Variable Flowrate' calculation method in a scenario and pick the dataset in its 'Flowrate Dataset' field - the dataset defines both one module's flowrate and its release duration, while the gas composition still comes from the scenario's Composition Method."
+            },
+            {
+                "icon": "⚙️",
+                "title": "Technical Notes",
+                "content": "• The battery room is modelled as a single well-mixed volume diluted by the ventilation rate\n• Gas composition comes from literature data per chemistry, or a user-defined composition\n• Flammable results are assessed against the battery LFL, or optionally a Le Chatelier mixture LFL\n• Toxic species are assessed against their ERPG-3 values\n• All correlations are based on 60 peer reviewed papers containing data for a total of 470 LIB experiments"
+            },
         ]
 
         main_layout = QVBoxLayout()
@@ -2384,7 +1584,10 @@ class PoolSpillPage(QWidget):
         toolbar = QToolBar("LIB Offgassing Calculation Tool")
         toolbar.setMovable(False)  # optional: prevent the toolbar from being dragged
         toolbarcontents = QWidget()
+        toolbarcontents.setObjectName("toolbarContents")
         toolbarlayout = QHBoxLayout()
+        toolbarlayout.setContentsMargins(0, 0, 0, 0)
+        toolbarlayout.setSpacing(6)
         toolbarcontents.setLayout(toolbarlayout)
         toolbar.addWidget(toolbarcontents)
         

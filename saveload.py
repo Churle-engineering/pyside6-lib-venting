@@ -15,547 +15,251 @@ Why JSON rather than CSV?
     captures all of this in one human-readable, self-describing file.
 
 What gets saved:
-    * ``LIBPage``      - the full project/type/scenario hierarchy from the
-                          scenario tree and toxicity/flammability calculation
-                          results (including the DataFrames used to draw the
-                          result plots).
-    * ``SprinklerPage`` - all input fields and the last computed activation
-                          result.
-    * ``PoolSpillPage`` - all input fields and checkbox/option state.
-    * ``ReceptorHeatFluxPage`` - all input fields.
-    * Global options    - selected calculation method, LFL options, target
-                          flammable gas, and imported gas flowrate data.
+    * Libraries      - custom LIB (battery) definitions, gas compositions and
+                       imported flowrate profiles held on ``BaseWindow``.
+    * ``LIBPage``    - the full group/scenario study tree, every scenario's
+                       ``LIBInputs`` and every stored ``ScenarioResult``
+                       (including the arrays used to redraw the result plots).
+    * Every page     - all ``QLineEdit`` / ``QComboBox`` / ``QCheckBox`` values
+                       found on the page, captured generically so pages added
+                       later (sprinkler, pool spill, receptor heat flux, ...)
+                       are saved without touching this module.
+    * The active theme.
 
 Forwards / backwards compatibility:
     * The payload is a versioned dictionary of top-level, independent sections.
-    * Every section is optional on load; missing keys are skipped gracefully, so
-      opening an older save in a newer build (or vice-versa) will not crash.
-        * Scenario rows are stored as independent dictionaries, so adding/removing
-            optional input fields in future versions will not corrupt older save files.
+    * Every section is optional on load and dataclass fields the running build no
+      longer has are dropped, so opening an older save in a newer build (or
+      vice-versa) will not crash.
 
 Note on coupling:
     This module intentionally avoids importing anything from ``main.py`` (that
     would create a circular import, since ``main.py`` imports the two public
     entry points below). Instead it accesses pages/widgets duck-typed, via
     ``getattr``/``hasattr``, so it keeps working even if a given page hasn't
-    been created yet.
+    been created yet. The Qt-specific study-tree rebuild lives on ``LIBPage``
+    itself (``tree_snapshot`` / ``restore_tree``).
 """
 
-import os
 import json
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 
-import pandas as pd
 import numpy as np
 
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QFileDialog,
+    QLineEdit,
     QMessageBox,
 )
 
+from information import FlowrateProfile, GasComposition, LIBInputs, LIBSpec
+from scenario_model import GasResults, Scenario, ScenarioResult
+
 FORMAT_ID = "lib_offgas_save"
-SAVE_VERSION = 2
+SAVE_VERSION = 4
 DEFAULT_EXTENSION = ".libsave"
-FILE_DIALOG_FILTER = "LIB Offgas Save (*.libsave);;JSON files (*.json);;All files (*.*)"
+FILE_SAVE_FILTER = "LIB Offgas Save (*.libsave);;JSON files (*.json);;All files (*.*)"
 FILE_OPEN_FILTER = "LIB Offgas Save (*.libsave *.json);;All files (*.*)"
 
+# A dataclass must be listed here to be written out, so a new one cannot silently
+# be dropped from a save file.
+_DATACLASS_TYPES = {
+    cls.__name__: cls
+    for cls in (LIBInputs, LIBSpec, GasComposition, FlowrateProfile,
+                Scenario, ScenarioResult, GasResults)
+}
+
+# Per-run/session-only dataclass fields that are never written to a save file.
+# Scenario results and summaries are cheap to recompute (press Run), and the bound
+# battery/composition/flowrate objects are re-bound by name from the libraries
+# section on load, so persisting any of them would only bloat and duplicate.
+_TRANSIENT_FIELDS = {
+    "Scenario": {"result", "summary", "lib_spec", "gas_composition", "flowrate_profile"},
+}
+
 
 # ---------------------------------------------------------------------------
-# Generic encode / decode helpers (handle pandas + numpy objects so the
-# calculation result dictionaries - which hold whole DataFrames used to draw
-# the result plots - can be written to/read from plain JSON).
+# Generic encode / decode helpers (dataclasses and numpy arrays - which hold the
+# calculated curves used to redraw the result plots - to/from plain JSON types).
 # ---------------------------------------------------------------------------
+
 def _encode(obj):
-    """Recursively convert an object graph into JSON-serialisable primitives."""
-    if isinstance(obj, pd.DataFrame):
-        return {"__type__": "DataFrame", "value": obj.to_dict(orient="split")}
-    if isinstance(obj, pd.Series):
-        return {"__type__": "Series", "value": obj.to_dict()}
-    if isinstance(obj, dict):
-        return {str(k): _encode(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_encode(v) for v in obj]
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.floating):
-        return None if np.isnan(obj) else float(obj)
-    if isinstance(obj, np.bool_):
-        return bool(obj)
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, np.generic):
+        return obj.item()
     if isinstance(obj, np.ndarray):
-        return _encode(obj.tolist())
-    if isinstance(obj, float) and np.isnan(obj):
-        return None
-    return obj
+        return {"__ndarray__": obj.tolist(), "dtype": str(obj.dtype), "shape": list(obj.shape)}
+    if is_dataclass(obj) and not isinstance(obj, type):
+        name = type(obj).__name__
+        if name not in _DATACLASS_TYPES:
+            raise TypeError(f"Cannot save unregistered dataclass {name!r}")
+        skip = _TRANSIENT_FIELDS.get(name, ())
+        return {
+            "__dataclass__": name,
+            "fields": {f.name: _encode(getattr(obj, f.name)) for f in fields(obj)
+                       if f.name not in skip},
+        }
+    if isinstance(obj, dict):
+        if all(isinstance(key, str) for key in obj):
+            return {"__dict__": {key: _encode(value) for key, value in obj.items()}}
+        return {"__items__": [[_encode(key), _encode(value)] for key, value in obj.items()]}
+    if isinstance(obj, (list, tuple, set)):
+        return [_encode(value) for value in obj]
+    raise TypeError(f"Cannot save value of type {type(obj).__name__}")
 
 
 def _decode(obj):
-    """Reverse :func:`_encode`, rebuilding pandas objects where tagged."""
-    if isinstance(obj, dict):
-        kind = obj.get("__type__")
-        if kind == "DataFrame":
-            v = obj.get("value", {})
-            return pd.DataFrame(
-                data=v.get("data", []),
-                index=v.get("index"),
-                columns=v.get("columns"),
-            )
-        if kind == "Series":
-            return pd.Series(obj.get("value", {}))
-        return {k: _decode(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_decode(v) for v in obj]
+        return [_decode(value) for value in obj]
+    if not isinstance(obj, dict):
+        return obj
+    if "__ndarray__" in obj:
+        array = np.array(obj["__ndarray__"], dtype=obj.get("dtype") or None)
+        shape = obj.get("shape")
+        return array.reshape(shape) if shape is not None else array
+    if "__dataclass__" in obj:
+        cls = _DATACLASS_TYPES.get(obj["__dataclass__"])
+        if cls is None:
+            raise ValueError(f"Unknown saved type {obj['__dataclass__']!r}")
+        # Fields the running build no longer has are dropped, so older saves still load.
+        names = {f.name for f in fields(cls)}
+        values = {k: _decode(v) for k, v in (obj.get("fields") or {}).items() if k in names}
+        return cls(**values)
+    if "__dict__" in obj:
+        return {key: _decode(value) for key, value in obj["__dict__"].items()}
+    if "__items__" in obj:
+        return {_decode(key): _decode(value) for key, value in obj["__items__"]}
     return obj
 
 
-def _json_default(o):
-    """Fallback for any stray numpy scalar that slips through ``_encode``."""
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return None if np.isnan(o) else float(o)
-    if isinstance(o, np.bool_):
-        return bool(o)
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    return str(o)
-
-
 # ---------------------------------------------------------------------------
-# LIBPage - scenario tree + shared calculation results
+# Widget capture / restore - generic, so pages added later are covered with no
+# changes here.
 # ---------------------------------------------------------------------------
-def _resolve_tree_item_classes(scenario_tree_widget):
-    """Return (ProjectTreeItem, ScenarioTypeTreeItem, ScenarioTreeItem) classes.
 
-    Classes are resolved from the bound method globals to avoid importing
-    ``main.py`` and creating a circular dependency.
-    """
-    globals_map = getattr(getattr(scenario_tree_widget, "_add_project", None), "__globals__", {}) or {}
-    return (
-        globals_map.get("ProjectTreeItem"),
-        globals_map.get("ScenarioTypeTreeItem"),
-        globals_map.get("ScenarioTreeItem"),
-    )
-
-
-def _collect_scenario_tree(scenario_tree_widget):
-    """Capture the full Project -> Type -> Scenario hierarchy."""
-    tree = getattr(scenario_tree_widget, "tree", None)
-    if tree is None:
-        return {"projects": []}
-
-    projects = []
-    root = tree.invisibleRootItem()
-    for i in range(root.childCount()):
-        project_item = root.child(i)
-        project_payload = {
-            "name": getattr(project_item, "project_name", project_item.text(0).strip()),
-            "expanded": bool(project_item.isExpanded()),
-            "types": [],
-        }
-
-        for j in range(project_item.childCount()):
-            type_item = project_item.child(j)
-            type_payload = {
-                "name": getattr(type_item, "type_name", type_item.text(0).strip()),
-                "expanded": bool(type_item.isExpanded()),
-                "scenarios": [],
-            }
-
-            for k in range(type_item.childCount()):
-                scenario_item = type_item.child(k)
-                type_payload["scenarios"].append(
-                    {
-                        "name": getattr(scenario_item, "scenario_name", scenario_item.text(0).strip()),
-                        "expanded": bool(scenario_item.isExpanded()),
-                        "data": _encode(getattr(scenario_item, "scenario_data", {}) or {}),
-                    }
-                )
-
-            project_payload["types"].append(type_payload)
-
-        projects.append(project_payload)
-
-    return {"projects": projects}
+def _capture_widgets(page):
+    state = {}
+    for name, widget in vars(page).items():
+        if isinstance(widget, QLineEdit):
+            state[name] = widget.text()
+        elif isinstance(widget, QComboBox):
+            state[name] = widget.currentText()
+        elif isinstance(widget, QCheckBox):
+            state[name] = widget.isChecked()
+    return state
 
 
-def _restore_scenario_tree(scenario_tree_widget, payload):
-    """Rebuild scenario tree hierarchy from payload."""
-    tree = getattr(scenario_tree_widget, "tree", None)
-    if tree is None:
-        return
-
-    projects = (payload or {}).get("projects", []) or []
-    if not projects:
-        return
-
-    project_cls, type_cls, scenario_cls = _resolve_tree_item_classes(scenario_tree_widget)
-    if project_cls is None or type_cls is None or scenario_cls is None:
-        raise RuntimeError("Scenario tree item classes are unavailable; cannot restore scenario hierarchy.")
-
-    tree.clear()
-    for project_payload in projects:
-        project_name = str(project_payload.get("name", "My Project") or "My Project")
-        project_item = project_cls(project_name)
-        tree.addTopLevelItem(project_item)
-
-        for type_payload in (project_payload.get("types", []) or []):
-            type_name = str(type_payload.get("name", "New Type") or "New Type")
-            type_item = type_cls(type_name)
-            project_item.addChild(type_item)
-
-            for scenario_payload in (type_payload.get("scenarios", []) or []):
-                scenario_name = str(scenario_payload.get("name", "New Scenario") or "New Scenario")
-                scenario_data = _decode(scenario_payload.get("data", {}) or {})
-                if not isinstance(scenario_data, dict):
-                    scenario_data = {}
-                scenario_item = scenario_cls(scenario_name, data=scenario_data)
-                type_item.addChild(scenario_item)
-                scenario_item.setExpanded(bool(scenario_payload.get("expanded", False)))
-
-            type_item.setExpanded(bool(type_payload.get("expanded", True)))
-
-        project_item.setExpanded(bool(project_payload.get("expanded", True)))
-
-
-def _collect_lib_page(lib_page):
-    base_window = getattr(lib_page, "base_window", None)
-    active_result_type = None
-    if isinstance(getattr(base_window, "flam_scenario_results", None), dict) and base_window.flam_scenario_results:
-        active_result_type = "flam"
-    elif isinstance(getattr(base_window, "tox_scenario_results", None), dict) and base_window.tox_scenario_results:
-        active_result_type = "tox"
-
-    return {
-        "scenario_tree": _collect_scenario_tree(getattr(lib_page, "scenario_tree", None)),
-        "results": {
-            "tox_scenario_results": _encode(getattr(base_window, "tox_scenario_results", {}) or {}),
-            "flam_scenario_results": _encode(getattr(base_window, "flam_scenario_results", {}) or {}),
-            "active_result_type": active_result_type,
-            "active_results_tab_index": getattr(getattr(lib_page, "results_tabs", None), "currentIndex", lambda: 0)(),
-        },
-    }
-
-
-def _restore_lib_page(lib_page, payload):
-    scenario_tree_payload = (payload or {}).get("scenario_tree", {}) or {}
-    _restore_scenario_tree(getattr(lib_page, "scenario_tree", None), scenario_tree_payload)
-
-    base_window = getattr(lib_page, "base_window", None)
-    results_payload = (payload or {}).get("results", {}) or {}
-    if base_window is not None:
-        tox_results = _decode(results_payload.get("tox_scenario_results", {}))
-        if isinstance(tox_results, dict):
-            base_window.tox_scenario_results = tox_results
-
-        flam_results = _decode(results_payload.get("flam_scenario_results", {}))
-        if isinstance(flam_results, dict):
-            base_window.flam_scenario_results = flam_results
-
-    active_result_type = results_payload.get("active_result_type")
-    if not active_result_type:
-        if getattr(base_window, "flam_scenario_results", None):
-            active_result_type = "flam"
-        elif getattr(base_window, "tox_scenario_results", None):
-            active_result_type = "tox"
-
-    if active_result_type in {"flam", "tox"} and hasattr(lib_page, "_update_results_display"):
-        lib_page._update_results_display(active_result_type)
-        desired_index = int(results_payload.get("active_results_tab_index", 0) or 0)
-        if hasattr(lib_page, "results_tabs") and 0 <= desired_index < lib_page.results_tabs.count():
-            lib_page.results_tabs.setCurrentIndex(desired_index)
-
-
-# ---------------------------------------------------------------------------
-# SprinklerPage
-# ---------------------------------------------------------------------------
-_SPRINKLER_LINE_EDITS = [
-    "sprinkler_id",
-    "ceiling_height",
-    "radial_distance",
-    "sprinkler_rti",
-    "activation_temperature",
-    "ambient_temperature",
-]
-
-
-def _collect_sprinkler_page(page):
-    inputs = {
-        name: getattr(page, name).text()
-        for name in _SPRINKLER_LINE_EDITS
-        if hasattr(page, name)
-    }
-    if hasattr(page, "fire_growth_rate"):
-        inputs["fire_growth_rate"] = page.fire_growth_rate.currentText()
-
-    return {
-        "inputs": inputs,
-        "last_activation_time_s": getattr(page, "last_activation_time_s", None),
-        "results_label_text": page.results_label.text() if hasattr(page, "results_label") else None,
-    }
-
-
-def _restore_sprinkler_page(page, payload):
-    inputs = payload.get("inputs", {}) or {}
-
-    for name in _SPRINKLER_LINE_EDITS:
+def _restore_widgets(page, state):
+    for name, value in (state or {}).items():
         widget = getattr(page, name, None)
-        if widget is not None and name in inputs:
-            widget.setText(str(inputs[name]))
-
-    if hasattr(page, "fire_growth_rate") and inputs.get("fire_growth_rate"):
-        found_index = page.fire_growth_rate.findText(inputs["fire_growth_rate"])
-        if found_index >= 0:
-            page.fire_growth_rate.setCurrentIndex(found_index)
-
-    page.last_activation_time_s = payload.get("last_activation_time_s")
-
-    results_label_text = payload.get("results_label_text")
-    if hasattr(page, "results_label") and results_label_text:
-        page.results_label.setText(results_label_text)
-
-    if hasattr(page, "copy_activation_button"):
-        page.copy_activation_button.setEnabled(page.last_activation_time_s is not None)
+        if isinstance(widget, QLineEdit):
+            widget.setText("" if value is None else str(value))
+        elif isinstance(widget, QComboBox):
+            index = widget.findText("" if value is None else str(value))
+            if index >= 0:
+                widget.setCurrentIndex(index)
+        elif isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
 
 
 # ---------------------------------------------------------------------------
-# PoolSpillPage
+# Whole-program state
 # ---------------------------------------------------------------------------
-_POOL_SPILL_COMBOS = [
-    "fuel_material",
-    "surface_weather",
-    "surface_material",
-    "ground_conditions",
-    "orifice_condition",
-]
-_POOL_SPILL_LINE_EDITS = [
-    "ambient_temperature",
-    "wind_speed",
-    "bund_size",
-    "volumetric_flowrate",
-    "orifice_diameter",
-    "delta_p",
-    "operator_intervention_time",
-]
-_POOL_SPILL_CHECKBOXES = ["oi_tickbox", "pool_fire_tickbox"]
 
-
-def _collect_pool_spill_page(page):
-    inputs = {}
-    for name in _POOL_SPILL_COMBOS:
-        widget = getattr(page, name, None)
-        if widget is not None:
-            inputs[name] = widget.currentText()
-    for name in _POOL_SPILL_LINE_EDITS:
-        widget = getattr(page, name, None)
-        if widget is not None:
-            inputs[name] = widget.text()
-
-    checkboxes = {
-        name: getattr(page, name).isChecked()
-        for name in _POOL_SPILL_CHECKBOXES
-        if hasattr(page, name)
-    }
-
-    return {"inputs": inputs, "checkboxes": checkboxes}
-
-
-def _restore_pool_spill_page(page, payload):
-    inputs = payload.get("inputs", {}) or {}
-
-    for name in _POOL_SPILL_COMBOS:
-        widget = getattr(page, name, None)
-        if widget is not None and name in inputs:
-            found_index = widget.findText(str(inputs[name]))
-            if found_index >= 0:
-                widget.setCurrentIndex(found_index)
-
-    for name in _POOL_SPILL_LINE_EDITS:
-        widget = getattr(page, name, None)
-        if widget is not None and name in inputs:
-            widget.setText(str(inputs[name]))
-
-    checkboxes = payload.get("checkboxes", {}) or {}
-    for name in _POOL_SPILL_CHECKBOXES:
-        widget = getattr(page, name, None)
-        if widget is not None and name in checkboxes:
-            widget.setChecked(bool(checkboxes[name]))
-
-
-# ---------------------------------------------------------------------------
-# ReceptorHeatFluxPage
-# ---------------------------------------------------------------------------
-_RECEPTOR_LINE_EDITS = ["emissive_power", "perpendicular_distance"]
-
-
-def _collect_receptor_heat_flux_page(page):
-    return {
-        name: getattr(page, name).text()
-        for name in _RECEPTOR_LINE_EDITS
-        if hasattr(page, name)
-    }
-
-
-def _restore_receptor_heat_flux_page(page, payload):
-    for name in _RECEPTOR_LINE_EDITS:
-        widget = getattr(page, name, None)
-        if widget is not None and name in (payload or {}):
-            widget.setText(str(payload[name]))
-
-
-# ---------------------------------------------------------------------------
-# Collect / restore the whole application state
-# ---------------------------------------------------------------------------
-def collect_program_state(base_window):
-    """Build a JSON-serialisable dict describing the entire program state."""
+def collect_state(base_window, theme_name=None):
+    """Build the JSON-ready payload describing the whole program state."""
     pages = getattr(base_window, "page", {}) or {}
 
-    payload = {
+    page_state = {}
+    for name, page in pages.items():
+        entry = {"widgets": _capture_widgets(page)}
+        if hasattr(page, "tree_snapshot"):
+            entry["study_tree"] = _encode(page.tree_snapshot())
+        page_state[name] = entry
+
+    return {
         "format": FORMAT_ID,
         "version": SAVE_VERSION,
         "saved_at": datetime.now().isoformat(timespec="seconds"),
-        "options": {
-            "selected_calc_method": getattr(base_window, "selected_calc_method", None),
-            "use_le_chatelier_lfl": getattr(base_window, "use_le_chatelier_lfl", None),
-            "use_temp_dependent_lfl": getattr(base_window, "use_temp_dependent_lfl", None),
-            "selected_target_flam_gas": getattr(base_window, "selected_target_flam_gas", None),
+        "theme": theme_name,
+        "libraries": {
+            "lib_definitions": _encode(getattr(base_window, "custom_lib_definitions", {})),
+            "compositions": _encode(getattr(base_window, "custom_composition_definitions", {})),
+            "flowrate_profiles": _encode(getattr(base_window, "custom_flowrate_profiles", {})),
         },
-        "gas_flowrate_data": _encode(getattr(base_window, "gas_flowrate_data", None)),
-        "custom_lib_definitions": _encode(getattr(base_window, "custom_lib_definitions", {}) or {}),
-        "custom_composition_definitions": _encode(getattr(base_window, "custom_composition_definitions", {}) or {}),
+        "pages": page_state,
     }
 
-    lib_page = pages.get("LIBPage")
-    if lib_page is not None:
-        payload["lib_page"] = _collect_lib_page(lib_page)
 
-    sprinkler_page = pages.get("SprinklerPage")
-    if sprinkler_page is not None:
-        payload["sprinkler_page"] = _collect_sprinkler_page(sprinkler_page)
+def apply_state(base_window, state):
+    """Restore a payload produced by `collect_state`.
 
-    pool_spill_page = pages.get("PoolSpillPage")
-    if pool_spill_page is not None:
-        payload["pool_spill_page"] = _collect_pool_spill_page(pool_spill_page)
+    Returns the theme name stored in the file (or None) so the caller can apply it.
+    Libraries are restored before the pages so scenarios rebind to their battery,
+    composition and flowrate definitions by name.
+    """
+    libraries = state.get("libraries") or {}
+    base_window.custom_lib_definitions = _decode(libraries.get("lib_definitions")) or {}
+    base_window.custom_composition_definitions = _decode(libraries.get("compositions")) or {}
+    base_window.custom_flowrate_profiles = _decode(libraries.get("flowrate_profiles")) or {}
 
-    receptor_page = pages.get("ReceptorHeatFluxPage")
-    if receptor_page is not None:
-        payload["receptor_heat_flux_page"] = _collect_receptor_heat_flux_page(receptor_page)
-
-    return payload
-
-
-def restore_program_state(base_window, payload):
-    """Apply a payload produced by :func:`collect_program_state` onto a live
-    ``BaseWindow`` instance, restoring every page's inputs, options and
-    calculated results."""
     pages = getattr(base_window, "page", {}) or {}
+    for name, entry in (state.get("pages") or {}).items():
+        page = pages.get(name)
+        if page is None:
+            continue
+        _restore_widgets(page, entry.get("widgets"))
+        if "study_tree" in entry and hasattr(page, "restore_tree"):
+            page.restore_tree(_decode(entry["study_tree"]))
 
-    options = payload.get("options", {}) or {}
-    for attr in (
-        "selected_calc_method",
-        "use_le_chatelier_lfl",
-        "use_temp_dependent_lfl",
-        "selected_target_flam_gas",
-    ):
-        if options.get(attr) is not None:
-            setattr(base_window, attr, options[attr])
-
-    base_window.gas_flowrate_data = _decode(payload.get("gas_flowrate_data"))
-    restored_custom_libs = _decode(payload.get("custom_lib_definitions", {}))
-    if isinstance(restored_custom_libs, dict):
-        base_window.custom_lib_definitions = restored_custom_libs
-
-    restored_compositions = _decode(payload.get("custom_composition_definitions", {}))
-    if isinstance(restored_compositions, dict):
-        base_window.custom_composition_definitions = restored_compositions
-
-    lib_page = pages.get("LIBPage")
-    if lib_page is not None and "lib_page" in payload:
-        _restore_lib_page(lib_page, payload["lib_page"])
-    if lib_page is not None and hasattr(lib_page, "sync_custom_lib_registry"):
-        lib_page.sync_custom_lib_registry()
-
-    sprinkler_page = pages.get("SprinklerPage")
-    if sprinkler_page is not None and "sprinkler_page" in payload:
-        _restore_sprinkler_page(sprinkler_page, payload["sprinkler_page"])
-
-    pool_spill_page = pages.get("PoolSpillPage")
-    if pool_spill_page is not None and "pool_spill_page" in payload:
-        _restore_pool_spill_page(pool_spill_page, payload["pool_spill_page"])
-
-    receptor_page = pages.get("ReceptorHeatFluxPage")
-    if receptor_page is not None and "receptor_heat_flux_page" in payload:
-        _restore_receptor_heat_flux_page(receptor_page, payload["receptor_heat_flux_page"])
+    return state.get("theme")
 
 
 # ---------------------------------------------------------------------------
-# Public entry points (wired to the File menu in main.py)
+# Public entry points (used by the File menu)
 # ---------------------------------------------------------------------------
-def save_program_state(base_window, file_path=None, parent=None):
-    """Prompt for a location (unless ``file_path`` is given) and write the
-    current session - every page's inputs, options and calculated results -
-    to a ``.libsave`` file. Returns ``True`` on success."""
-    parent = parent or base_window
 
-    if file_path is None:
-        file_path, _selected_filter = QFileDialog.getSaveFileName(
-            parent, "Save Session", "", FILE_DIALOG_FILTER
+def save_program_state(base_window, theme_name=None, path=None):
+    """Write the whole program state to a JSON session file. Returns the path used."""
+    if not path:
+        path, _ = QFileDialog.getSaveFileName(
+            base_window, "Save Session", "session" + DEFAULT_EXTENSION, FILE_SAVE_FILTER
         )
-        if not file_path:
-            return False
-
-    if not os.path.splitext(file_path)[1]:
-        file_path += DEFAULT_EXTENSION
+        if not path:
+            return None
 
     try:
-        payload = collect_program_state(base_window)
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, default=_json_default)
-    except Exception as exc:
-        QMessageBox.critical(parent, "Save Error", f"Failed to save session:\n{exc}")
-        return False
+        payload = collect_state(base_window, theme_name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except (OSError, TypeError, ValueError) as exc:
+        QMessageBox.critical(base_window, "Save Failed", f"Could not save the session:\n{exc}")
+        return None
 
-    QMessageBox.information(
-        parent, "Save Session", f"Session saved successfully to:\n{os.path.basename(file_path)}"
-    )
-    return True
+    base_window.current_save_path = path
+    return path
 
 
-def load_program_state(base_window, file_path=None, parent=None):
-    """Prompt for a save file (unless ``file_path`` is given) and restore the
-    full session from it. Returns ``True`` on success."""
-    parent = parent or base_window
-
-    if file_path is None:
-        file_path, _selected_filter = QFileDialog.getOpenFileName(
-            parent, "Open Save File", "", FILE_OPEN_FILTER
-        )
-        if not file_path:
-            return False
+def load_program_state(base_window, path=None):
+    """Read a session file and restore it. Returns (path, theme_name), or (None, None)."""
+    if not path:
+        path, _ = QFileDialog.getOpenFileName(base_window, "Open Session", "", FILE_OPEN_FILTER)
+        if not path:
+            return None, None
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except Exception as exc:
-        QMessageBox.critical(parent, "Open Error", f"Failed to read file:\n{exc}")
-        return False
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict) or payload.get("format") != FORMAT_ID:
+            raise ValueError("This file is not a LIB Off-gassing session file.")
+        theme_name = apply_state(base_window, payload)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        QMessageBox.critical(base_window, "Open Failed", f"Could not open the session:\n{exc}")
+        return None, None
 
-    if not isinstance(payload, dict) or payload.get("format") != FORMAT_ID:
-        reply = QMessageBox.question(
-            parent,
-            "Unrecognized File",
-            "This file does not look like a LIB Offgas save file.\nTry to load it anyway?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return False
-
-    try:
-        restore_program_state(base_window, payload)
-    except Exception as exc:
-        QMessageBox.critical(parent, "Load Error", f"Failed to load session:\n{exc}")
-        return False
-
-    QMessageBox.information(parent, "Open Save File", "Session loaded successfully.")
-    return True
-
+    base_window.current_save_path = path
+    return path, theme_name
