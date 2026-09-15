@@ -450,41 +450,36 @@ BATTERY_CHEMISTRY_DATA = {
 # TEMPERATURE CONSTANTS
 # ============================================================================
 
-# Data for the linear relationship equation between temperature and LFL
-
-TEMPERATURE_DEPENDENT_LFL_PARAMETERS = {"co": {"a": -0.0108, "b": 12.456},
-                                        "h2": {"a": -0.0120, "b": 7.2884},
-                                        "thc": {"a": -0.0040, "b": 5.0990}}
-
-
 # Data sourced from "Chem property data txt" folder text files.
 # density: g/L (or kg/m3 as provided in source data, e.g. water in kg/m3)
 # erpg_3: ERPG-3 value (ppm, or ppm/percent depending on gas - see source file). None if N/A.
 # lfl: Lower Flammable Limit (%). None if N/A / not flammable.
 # molecular_weight: g/mol. None if N/A.
+#source for heat of combustion is engineering toolbox: https://www.engineeringtoolbox.com/standard-heat-of-combustion-energy-content-d_1987.html
+
 CHEMICAL_PROPERTIES = {
-    'benzene':      {'density': 3.313, 'erpg_3': 3.313, 'lfl': 1.4,  'molecular_weight': 78.11,    'toxicity_factor': 1, 'flammability_factor': 1},
-    'toluene':      {'density': 3.755, 'erpg_3': 3.755, 'lfl': 1.3,  'molecular_weight': 92.13842, 'toxicity_factor': 1, 'flammability_factor': 1},
-    'co':           {'density': 0.967, 'erpg_3': 0.484, 'lfl': 12.5, 'molecular_weight': 28.0101,  'toxicity_factor': 1, 'flammability_factor': 1},
-    'co2':          {'density': 1.830, 'erpg_3': 0.000, 'lfl': None, 'molecular_weight': 44.0095,  'toxicity_factor': 0, 'flammability_factor': 0},
-    'no2':          {'density': 1.890, 'erpg_3': 0.057, 'lfl': None, 'molecular_weight': 46.01,    'toxicity_factor': 1, 'flammability_factor': 0},
-    'hcl':          {'density': 1.517, 'erpg_3': 0.227, 'lfl': None, 'molecular_weight': 36.46,    'toxicity_factor': 1, 'flammability_factor': 0},
-    'hf':           {'density': 0.825, 'erpg_3': 0.041, 'lfl': None, 'molecular_weight': 20.01,    'toxicity_factor': 1, 'flammability_factor': 0},
-    'hcn':          {'density': 1.078, 'erpg_3': 0.027, 'lfl': 5.6,  'molecular_weight': 27.0253,  'toxicity_factor': 1, 'flammability_factor': 1},
-    'so2':          {'density': 1.078, 'erpg_3': 25,    'lfl': None, 'molecular_weight': 64.07,    'toxicity_factor': 1, 'flammability_factor': 0},
-    'c2h5f':        {'density': 2.14,  'erpg_3': 260000,'lfl': 2.6,  'molecular_weight': 48.0601,  'toxicity_factor': 1, 'flammability_factor': 1},
-    'methanol':     {'density': 1.11,  'erpg_3': 145000,'lfl': 6,    'molecular_weight': 32.042,   'toxicity_factor': 1, 'flammability_factor': 1},
-    'dmc':          {'density': 3.1,   'erpg_3': 140,   'lfl': 4.2,  'molecular_weight': 90.08,    'toxicity_factor': 1, 'flammability_factor': 1},
-    'dec':          {'density': 4.1,   'erpg_3': 21,    'lfl': 4.2,  'molecular_weight': 118.13,   'toxicity_factor': 1, 'flammability_factor': 1},
-    'propane':      {'density': 0.86,  'erpg_3': 180000,'lfl': 2.1,  'molecular_weight': 44.10,    'toxicity_factor': 1, 'flammability_factor': 1},
-    'xylene':       {'density': 3.7,   'erpg_3': 2500,  'lfl': 1.7,  'molecular_weight': 106.17,   'toxicity_factor': 1, 'flammability_factor': 1},
-    'h2':           {'density': 0.084, 'erpg_3': None,  'lfl': 4.0,  'molecular_weight': 2.01588,  'toxicity_factor': 1, 'flammability_factor': 1},
-    'h2o':          {'density': 996.86,'erpg_3': None,  'lfl': None, 'molecular_weight': 18.015,   'toxicity_factor': 0, 'flammability_factor': 0},
-    'pf3':          {'density': 3.907, 'erpg_3': 10,    'lfl': None, 'molecular_weight': 87.97,    'toxicity_factor': 0, 'flammability_factor': 0},
-    'methane':      {'density': 0.664, 'erpg_3': None,  'lfl': 4.4,  'molecular_weight': 16.04,    'toxicity_factor': 0, 'flammability_factor': 1},
-    'thc':          {'density': 3.708, 'erpg_3': None, 'lfl': 6.5,   'molecular_weight': None,     'toxicity_factor': 0, 'flammability_factor': 1},
-    'ethanol':      {'density': 0.668, 'erpg_3': None,  'lfl': 5.0,  'molecular_weight': 46.08,    'toxicity_factor': 0, 'flammability_factor': 1},
-    'no':           {'density': 1.34,  'erpg_3': None,  'lfl': None, 'molecular_weight': 30.01,    'toxicity_factor': 0, 'flammability_factor': 0},
+    'benzene':      {'delta_Hc': 3268, 'density': 3.313, 'erpg_3': 1000.0, 'lfl': 1.4,  'molecular_weight': 78.11,    'toxicity_factor': 1, 'flammability_factor': 1},
+    'toluene':      {'delta_Hc': 3910, 'density': 3.755, 'erpg_3': 1000.0, 'lfl': 1.3,  'molecular_weight': 92.13842, 'toxicity_factor': 1, 'flammability_factor': 1},
+    'co':           {'delta_Hc': 283, 'density': 0.967, 'erpg_3': 500.0, 'lfl': 12.5, 'molecular_weight': 28.0101,  'toxicity_factor': 1, 'flammability_factor': 1},
+    'co2':          {'delta_Hc': None, 'density': 1.830, 'erpg_3': None, 'lfl': None, 'molecular_weight': 44.0095,  'toxicity_factor': 0, 'flammability_factor': 0},
+    'no2':          {'delta_Hc': None, 'density': 1.890, 'erpg_3': 30.0, 'lfl': None, 'molecular_weight': 46.01,    'toxicity_factor': 1, 'flammability_factor': 0},
+    'hcl':          {'delta_Hc': None, 'density': 1.517, 'erpg_3': 150.0, 'lfl': None, 'molecular_weight': 36.46,    'toxicity_factor': 1, 'flammability_factor': 0},
+    'hf':           {'delta_Hc': None, 'density': 0.825, 'erpg_3': 50.0, 'lfl': None, 'molecular_weight': 20.01,    'toxicity_factor': 1, 'flammability_factor': 0},
+    'hcn':          {'delta_Hc': 672, 'density': 1.078, 'erpg_3': 25.0, 'lfl': 5.6,  'molecular_weight': 27.0253,  'toxicity_factor': 1, 'flammability_factor': 1},
+    'so2':          {'delta_Hc': None, 'density': 2.6, 'erpg_3': 25.0,    'lfl': None, 'molecular_weight': 64.07,    'toxicity_factor': 1, 'flammability_factor': 0},
+    'c2h5f':        {'delta_Hc': 103.0, 'density': 2.14,  'erpg_3': 260000.0,'lfl': 2.6,  'molecular_weight': 48.0601,  'toxicity_factor': 1, 'flammability_factor': 1},
+    'methanol':     {'delta_Hc': 726, 'density': 1.11,  'erpg_3': 145000.0,'lfl': 6.0,    'molecular_weight': 32.042,   'toxicity_factor': 1, 'flammability_factor': 1},
+    'dmc':          {'delta_Hc': 1110.0, 'density': 3.1,   'erpg_3': 140.0,   'lfl': 4.2,  'molecular_weight': 90.08,    'toxicity_factor': 1, 'flammability_factor': 1},
+    'dec':          {'delta_Hc': 2870.0, 'density': 4.1,   'erpg_3': 21.0,    'lfl': 4.2,  'molecular_weight': 118.13,   'toxicity_factor': 1, 'flammability_factor': 1},
+    'propane':      {'delta_Hc': 2220, 'density': 1.8,  'erpg_3': 180000.0,'lfl': 2.1,  'molecular_weight': 44.10,    'toxicity_factor': 1, 'flammability_factor': 1},
+    'xylene':       {'delta_Hc': 515.0, 'density': 3.7,   'erpg_3': 2500.0,  'lfl': 1.7,  'molecular_weight': 106.17,   'toxicity_factor': 1, 'flammability_factor': 1},
+    'h2':           {'delta_Hc': 286, 'density': 0.084, 'erpg_3': None,  'lfl': 4.0,  'molecular_weight': 2.01588,  'toxicity_factor': 1, 'flammability_factor': 1},
+    'h2o':          {'delta_Hc': None, 'density': 0.57825,'erpg_3': None,  'lfl': None, 'molecular_weight': 18.015,   'toxicity_factor': 0, 'flammability_factor': 0},
+    'pf3':          {'delta_Hc': None, 'density': 3.907, 'erpg_3': 10,    'lfl': None, 'molecular_weight': 87.96897148,    'toxicity_factor': 0, 'flammability_factor': 0},
+    'methane':      {'delta_Hc': 891, 'density': 0.664, 'erpg_3': None,  'lfl': 4.4,  'molecular_weight': 16.04,    'toxicity_factor': 0, 'flammability_factor': 1},
+    'thc':          {'delta_Hc': 384.4, 'density': 3.708, 'erpg_3': None, 'lfl': 6.5,   'molecular_weight': 80.0,     'toxicity_factor': 0, 'flammability_factor': 1},
+    'ethanol':      {'delta_Hc': 1367, 'density': 1.9, 'erpg_3': None,  'lfl': 5.0,  'molecular_weight': 46.08,    'toxicity_factor': 0, 'flammability_factor': 1},
+    'no':           {'delta_Hc': 82, 'density': 1.34,  'erpg_3': None,  'lfl': None, 'molecular_weight': 30.01,    'toxicity_factor': 0, 'flammability_factor': 0},
 }
 
 
@@ -565,6 +560,7 @@ _THEMES: dict = {
         QMenuBar           { background-color: #dde6f0; color: #1a2733; border-bottom: 1px solid #b0c4d8; }
         QMenuBar::item:selected { background-color: #b8cfea; }
         QMenu              { background-color: #ffffff; border: 1px solid #b0c4d8; color: #1a2733; }
+        QMenu::item        { padding: 4px 24px 4px 12px; }
         QMenu::item:selected   { background-color: #b8cfea; }
         QToolBar           { background-color: #dde6f0; border-bottom: 2px solid #b0c4d8; spacing: 6px; padding: 4px; }
         QWidget#toolbarContents { background-color: #dde6f0; }
@@ -574,6 +570,11 @@ _THEMES: dict = {
         QPushButton:pressed { background-color: #6faae6; }
         QPushButton#clearAllButton       { background-color: #d9534f; border-color: #c9302c; color: #ffffff; }
         QPushButton#clearAllButton:hover { background-color: #c9302c; }
+        QPushButton#runButton            { background-color: #2e9e5b; border-color: #257f49; color: #ffffff; }
+        QPushButton#runButton:hover      { background-color: #257f49; }
+        QPushButton#tutorialButton       { background-color: transparent; border: 1px solid #7aabdb; font-weight: normal; }
+        QPushButton#tutorialButton:hover { background-color: #dde6f0; }
+        QLabel#introSubtitle             { color: #5a6b7a; }
         QComboBox          { background-color: #ffffff; border: 1px solid #7aabdb; border-radius: 4px; padding: 4px 8px; }
         QComboBox QAbstractItemView { background-color: #ffffff; selection-background-color: #b8cfea; }
         QCheckBox          { spacing: 6px; }
@@ -589,10 +590,12 @@ _THEMES: dict = {
         QScrollBar:vertical { background: #e8eef5; width: 12px; }
         QScrollBar::handle:vertical { background: #7aabdb; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #7aabdb; }
-        QWidget#scenarioTreeWidget { border: 1px solid #8ba9c7; border-radius: 6px; background-color: #eef4fb; }
+        QWidget#scenarioTreeWidget, QWidget#plotDisplay, QScrollArea#summaryResultsPanel { border: 2px solid #111111; border-radius: 7px; background-color: #eef4fb; }
         QWidget#scenarioTreeHeader { background-color: #eef4fb; border-bottom: 1px solid #8ba9c7; }
         QWidget#scenarioTreeHeader QLabel { background-color: transparent; color: #1a2733; }
         QTreeWidget#scenarioTreeInner { background-color: #eef4fb; border: none; padding: 2px; }
+        QWidget#plotDisplay { background-color: #ffffff; }
+        QScrollArea#summaryResultsPanel { background-color: #ffffff; }
     """,
     "Dark": """
         QWidget            { background-color: #1e1e2e; color: #cdd6f4; font-size: 13px; }
@@ -600,6 +603,7 @@ _THEMES: dict = {
         QMenuBar           { background-color: #181825; color: #cdd6f4; border-bottom: 1px solid #313244; }
         QMenuBar::item:selected { background-color: #313244; }
         QMenu              { background-color: #181825; border: 1px solid #313244; color: #cdd6f4; }
+        QMenu::item        { padding: 4px 24px 4px 12px; }
         QMenu::item:selected   { background-color: #313244; }
         QToolBar           { background-color: #181825; border-bottom: 2px solid #313244; spacing: 6px; padding: 4px; }
         QWidget#toolbarContents { background-color: #181825; }
@@ -609,6 +613,11 @@ _THEMES: dict = {
         QPushButton:pressed { background-color: #585b70; }
         QPushButton#clearAllButton       { background-color: #f38ba8; border-color: #e06c75; color: #1e1e2e; }
         QPushButton#clearAllButton:hover { background-color: #e06c75; color: #ffffff; }
+        QPushButton#runButton            { background-color: #a6e3a1; border-color: #94d28d; color: #1e1e2e; }
+        QPushButton#runButton:hover      { background-color: #94d28d; }
+        QPushButton#tutorialButton       { background-color: transparent; border: 1px solid #585b70; font-weight: normal; }
+        QPushButton#tutorialButton:hover { background-color: #313244; }
+        QLabel#introSubtitle             { color: #9399b2; }
         QComboBox          { background-color: #313244; border: 1px solid #585b70; border-radius: 4px; padding: 4px 8px; color: #cdd6f4; }
         QComboBox QAbstractItemView { background-color: #313244; color: #cdd6f4; selection-background-color: #45475a; }
         QCheckBox          { spacing: 6px; color: #cdd6f4; }
@@ -626,10 +635,12 @@ _THEMES: dict = {
         QScrollBar::handle:vertical { background: #585b70; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #585b70; }
         QLabel             { color: #cdd6f4; }
-        QWidget#scenarioTreeWidget { border: 1px solid #4c5064; border-radius: 6px; background-color: #25273a; }
+        QWidget#scenarioTreeWidget, QWidget#plotDisplay, QScrollArea#summaryResultsPanel { border: 2px solid #111111; border-radius: 7px; background-color: #25273a; }
         QWidget#scenarioTreeHeader { background-color: #25273a; border-bottom: 1px solid #4c5064; }
         QWidget#scenarioTreeHeader QLabel { background-color: transparent; color: #cdd6f4; }
         QTreeWidget#scenarioTreeInner { background-color: #25273a; border: none; padding: 2px; }
+        QWidget#plotDisplay { background-color: #1e1e2e; }
+        QScrollArea#summaryResultsPanel { background-color: #1e1e2e; }
     """,
     "Arup Red": """
         QWidget            { background-color: #fafafa; color: #1a1a1a; font-size: 13px; }
@@ -637,6 +648,7 @@ _THEMES: dict = {
         QMenuBar           { background-color: #e8001c; color: #ffffff; border-bottom: 2px solid #b30016; }
         QMenuBar::item:selected { background-color: #b30016; }
         QMenu              { background-color: #ffffff; border: 1px solid #e8001c; color: #1a1a1a; }
+        QMenu::item        { padding: 4px 24px 4px 12px; }
         QMenu::item:selected   { background-color: #ffd6d9; }
         QToolBar           { background-color: #f2f2f2; border-bottom: 2px solid #e8001c; spacing: 6px; padding: 4px; }
         QWidget#toolbarContents { background-color: #f2f2f2; }
@@ -646,6 +658,11 @@ _THEMES: dict = {
         QPushButton:pressed { background-color: #ffb3b8; }
         QPushButton#clearAllButton       { background-color: #e8001c; border-color: #b30016; color: #ffffff; }
         QPushButton#clearAllButton:hover { background-color: #b30016; }
+        QPushButton#runButton            { background-color: #2e9e5b; border-color: #1e6e3e; color: #ffffff; }
+        QPushButton#runButton:hover      { background-color: #1e6e3e; }
+        QPushButton#tutorialButton       { background-color: transparent; border: 1px solid #c9c9c9; font-weight: normal; }
+        QPushButton#tutorialButton:hover { background-color: #ffd6d9; }
+        QLabel#introSubtitle             { color: #666666; }
         QComboBox          { background-color: #ffffff; border: 2px solid #e8001c; border-radius: 4px; padding: 4px 8px; }
         QComboBox QAbstractItemView { background-color: #ffffff; selection-background-color: #ffd6d9; }
         QCheckBox          { spacing: 6px; }
@@ -661,10 +678,12 @@ _THEMES: dict = {
         QScrollBar:vertical { background: #f5f5f5; width: 12px; }
         QScrollBar::handle:vertical { background: #e8001c; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #e8001c; }
-        QWidget#scenarioTreeWidget { border: 2px solid #cf102a; border-radius: 6px; background-color: #fff6f7; }
+        QWidget#scenarioTreeWidget, QWidget#plotDisplay, QScrollArea#summaryResultsPanel { border: 2px solid #111111; border-radius: 7px; background-color: #fff6f7; }
         QWidget#scenarioTreeHeader { background-color: #fff6f7; border-bottom: 1px solid #cf102a; }
         QWidget#scenarioTreeHeader QLabel { background-color: transparent; color: #1a1a1a; }
         QTreeWidget#scenarioTreeInner { background-color: #fff6f7; border: none; padding: 2px; }
+        QWidget#plotDisplay { background-color: #ffffff; }
+        QScrollArea#summaryResultsPanel { background-color: #ffffff; }
     """,
     "High Contrast": """
         QWidget            { background-color: #000000; color: #ffffff; font-size: 13px; }
@@ -672,6 +691,7 @@ _THEMES: dict = {
         QMenuBar           { background-color: #000000; color: #ffffff; border-bottom: 2px solid #ffffff; }
         QMenuBar::item:selected { background-color: #ffffff; color: #000000; }
         QMenu              { background-color: #000000; border: 2px solid #ffffff; color: #ffffff; }
+        QMenu::item        { padding: 4px 24px 4px 12px; }
         QMenu::item:selected   { background-color: #ffffff; color: #000000; }
         QToolBar           { background-color: #000000; border-bottom: 2px solid #ffffff; spacing: 6px; padding: 4px; }
         QWidget#toolbarContents { background-color: #000000; }
@@ -681,6 +701,11 @@ _THEMES: dict = {
         QPushButton:pressed { background-color: #555555; }
         QPushButton#clearAllButton       { background-color: #ffff00; border-color: #ffffff; color: #000000; }
         QPushButton#clearAllButton:hover { background-color: #ffcc00; }
+        QPushButton#runButton            { background-color: #00ff00; border-color: #ffffff; color: #000000; }
+        QPushButton#runButton:hover      { background-color: #00cc00; }
+        QPushButton#tutorialButton       { background-color: #000000; border: 2px solid #ffffff; font-weight: normal; }
+        QPushButton#tutorialButton:hover { background-color: #333333; }
+        QLabel#introSubtitle             { color: #cccccc; }
         QComboBox          { background-color: #000000; border: 2px solid #ffffff; border-radius: 4px; padding: 4px 8px; color: #ffffff; }
         QComboBox QAbstractItemView { background-color: #000000; color: #ffffff;
                                       selection-background-color: #ffffff; selection-color: #000000; }
@@ -699,10 +724,12 @@ _THEMES: dict = {
         QScrollBar::handle:vertical { background: #ffffff; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #ffffff; }
         QLabel             { color: #ffffff; }
-        QWidget#scenarioTreeWidget { border: 2px solid #ffffff; border-radius: 6px; background-color: #1a1a1a; }
+        QWidget#scenarioTreeWidget, QWidget#plotDisplay, QScrollArea#summaryResultsPanel { border: 2px solid #111111; border-radius: 7px; background-color: #1a1a1a; }
         QWidget#scenarioTreeHeader { background-color: #1a1a1a; border-bottom: 1px solid #ffffff; }
         QWidget#scenarioTreeHeader QLabel { background-color: transparent; color: #ffffff; }
         QTreeWidget#scenarioTreeInner { background-color: #1a1a1a; border: none; padding: 2px; }
+        QWidget#plotDisplay { background-color: #000000; }
+        QScrollArea#summaryResultsPanel { background-color: #000000; }
     """,
     "Warm Slate": """
         QWidget            { background-color: #f5f0eb; color: #2c1f14; font-size: 13px; }
@@ -710,6 +737,7 @@ _THEMES: dict = {
         QMenuBar           { background-color: #e8ddd2; color: #2c1f14; border-bottom: 1px solid #c4a882; }
         QMenuBar::item:selected { background-color: #d4bfa0; }
         QMenu              { background-color: #fff8f2; border: 1px solid #c4a882; color: #2c1f14; }
+        QMenu::item        { padding: 4px 24px 4px 12px; }
         QMenu::item:selected   { background-color: #e8d5bc; }
         QToolBar           { background-color: #ede4d8; border-bottom: 2px solid #c4a882; spacing: 6px; padding: 4px; }
         QWidget#toolbarContents { background-color: #ede4d8; }
@@ -719,6 +747,11 @@ _THEMES: dict = {
         QPushButton:pressed { background-color: #a87d5a; color: #ffffff; }
         QPushButton#clearAllButton       { background-color: #c0392b; border-color: #922b21; color: #ffffff; }
         QPushButton#clearAllButton:hover { background-color: #922b21; }
+        QPushButton#runButton            { background-color: #4a7c59; border-color: #3d6749; color: #ffffff; }
+        QPushButton#runButton:hover      { background-color: #3d6749; }
+        QPushButton#tutorialButton       { background-color: transparent; border: 1px solid #c4a882; font-weight: normal; }
+        QPushButton#tutorialButton:hover { background-color: #e8d5bc; }
+        QLabel#introSubtitle             { color: #7a6a58; }
         QComboBox          { background-color: #fff8f2; border: 1px solid #a87d5a; border-radius: 4px; padding: 4px 8px; }
         QComboBox QAbstractItemView { background-color: #fff8f2; selection-background-color: #e8d5bc; }
         QCheckBox          { spacing: 6px; }
@@ -734,10 +767,12 @@ _THEMES: dict = {
         QScrollBar:vertical { background: #ede4d8; width: 12px; }
         QScrollBar::handle:vertical { background: #c4a882; border-radius: 5px; min-height: 20px; }
         QFrame[frameShape="5"] { color: #c4a882; }
-        QWidget#scenarioTreeWidget { border: 1px solid #ad8c66; border-radius: 6px; background-color: #fbf4ec; }
+        QWidget#scenarioTreeWidget, QWidget#plotDisplay, QScrollArea#summaryResultsPanel { border: 2px solid #111111; border-radius: 7px; background-color: #fbf4ec; }
         QWidget#scenarioTreeHeader { background-color: #fbf4ec; border-bottom: 1px solid #ad8c66; }
         QWidget#scenarioTreeHeader QLabel { background-color: transparent; color: #2c1f14; }
         QTreeWidget#scenarioTreeInner { background-color: #fbf4ec; border: none; padding: 2px; }
+        QWidget#plotDisplay { background-color: #fff8f2; }
+        QScrollArea#summaryResultsPanel { background-color: #fff8f2; }
     """,
 }
 

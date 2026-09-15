@@ -511,16 +511,58 @@ def le_chatelier_lfl(fractions):
     return 1.0 / denominator if denominator > 0 else None
 
 
-def temperature_adjusted_lfl(base_lfl, temperature_c):
-    """Placeholder temperature correction: scale an LFL by a single temporary factor.
+def weighted_delta_hc(fractions, gas_data=None):
+    """Compute weighted heat of combustion in kcal/mol from composition fractions.
 
-    Kept deliberately trivial until the real temperature relationship is specified;
-    every caller goes through here so only this body needs replacing later.
+    fractions: {species: fraction}
+    gas_data: dict of chemical properties in kJ/mol (defaults to CHEMICAL_PROPERTIES)
+    """
+    if gas_data is None:
+        gas_data = CHEMICAL_PROPERTIES
+    if not fractions:
+        return None
+
+    usable = []
+    for species, fraction in fractions.items():
+        if fraction <= 0 or species not in gas_data:
+            continue
+        prop = gas_data[species]
+        dh = prop.get('delta_Hc')
+        if dh is not None and abs(float(dh)) > 0:
+            usable.append((float(fraction), abs(float(dh))))
+
+    if not usable:
+        return None
+
+    total_weight = sum(w for w, _ in usable)
+    if total_weight <= 0:
+        return None
+
+    weighted_kj_per_mol = sum(w * dh for w, dh in usable) / total_weight
+    return weighted_kj_per_mol * 0.2390057
+
+
+def temperature_adjusted_lfl(base_lfl, temperature_c, fractions=None, delta_Hc=None, gas_data=None):
+    """Temperature-adjusted LFL (v/v%) via the modified Burgess-Wheeler / Zabetakis equation:
+
+        LFL(T) = LFL(25°C) - (0.75 / delta_Hc) * (T - 25)
+
+    where delta_Hc is the weighted average heat of combustion across the composition's gases.
+    Returns the temperature-adjusted LFL (float).
     """
     if base_lfl is None:
         return None
-    temporary_factor = 1.0
-    return base_lfl * temporary_factor
+    if temperature_c is None:
+        return float(base_lfl)
+
+    if delta_Hc is None:
+        if fractions is not None:
+            delta_Hc = weighted_delta_hc(fractions, gas_data)
+        if delta_Hc is None or delta_Hc <= 0:
+            delta_Hc = 384.4
+
+    lfl_t = float(base_lfl) - (0.75 / delta_Hc) * (float(temperature_c) - 25.0)
+    return max(0.0, lfl_t)
 
 
 def resolve_lfl(inputs, spec, fractions):
@@ -545,7 +587,7 @@ def resolve_lfl(inputs, spec, fractions):
         label = "LFL"
 
     if inputs.use_temp_dependent_lfl:
-        lfl = temperature_adjusted_lfl(lfl, spec.venting_temperature)
+        lfl = temperature_adjusted_lfl(lfl, spec.venting_temperature, fractions=fractions)
         label = f"Temperature-adjusted {label}"
 
     return lfl, label

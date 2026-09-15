@@ -1,9 +1,11 @@
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabWidget, QToolBar,
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox, QGridLayout)
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QDoubleValidator, QKeySequence, QShortcut
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox, QGridLayout,
+    QAbstractItemView, QMenu, QTableWidget, QTableWidgetItem)
+from PySide6.QtCore import Qt, QSettings
+from PySide6.QtGui import (QFont, QDoubleValidator, QKeySequence, QShortcut,
+    QActionGroup, QColor, QIcon, QPainter, QPixmap)
 from information import (FIRE_PROPERTIES, POOL_SPREAD_DATA, LIB_TYPE, CELL_FORMAT, CALCULATION_METHODS, _THEMES,
                          POOL_PROPERTIES, CHEMICAL_PROPERTIES, COMPOSITION_METHODS,
                          FlowrateProfile, GasComposition, LIBInputs, LIBSpec,
@@ -37,6 +39,12 @@ from saveload import save_program_state, load_program_state
 # ---------------------------------------------------------------------------
 _current_theme = "Warm Slate"  # Default theme applied at startup
 
+
+def app_settings() -> QSettings:
+    """Persistent user preferences (theme, window geometry, splitter layout)."""
+    return QSettings("Arup", "LIBOffgasTool")
+
+
 # Main application window that hosts the page stack and shared state for the
 # different calculation modules.
 class BaseWindow(QMainWindow):
@@ -44,7 +52,11 @@ class BaseWindow(QMainWindow):
         super().__init__()
         
         self.setWindowTitle("Charlie's Proprietary LIB Offgas Modelling Tool")
-        self.setGeometry(500, 500, 800, 600)
+        saved_geometry = app_settings().value("window/geometry")
+        if saved_geometry is not None:
+            self.restoreGeometry(saved_geometry)
+        else:
+            self.setGeometry(500, 500, 800, 600)
         self.page_stack = QStackedWidget()
         self.setCentralWidget(self.page_stack) #set as central widget of page
         self.page = {}  # store pages by name
@@ -105,23 +117,54 @@ class BaseWindow(QMainWindow):
         backButton = menubar.addAction('Back')# back button
         backButton.triggered.connect(lambda: self.show_page("IntroPage"))
         fileMenu = menubar.addMenu('File')
-        openAction = fileMenu.addAction('Open Session...')
+        openAction = fileMenu.addAction('Open...')
         openAction.setShortcut(QKeySequence.Open)
         openAction.triggered.connect(self.open_session)
-        saveAction = fileMenu.addAction('Save Session')
+        saveAction = fileMenu.addAction('Save')
         saveAction.setShortcut(QKeySequence.Save)
         saveAction.triggered.connect(lambda: self.save_session(use_current_path=True))
-        saveAsAction = fileMenu.addAction('Save Session As...')
+        saveAsAction = fileMenu.addAction('Save As...')
         saveAsAction.setShortcut(QKeySequence.SaveAs)
         saveAsAction.triggered.connect(lambda: self.save_session(use_current_path=False))
         fileMenu.addSeparator()
         exitAction = fileMenu.addAction('Exit')
-        exitAction.triggered.connect(lambda: ask_to_close(self))
+        exitAction.triggered.connect(self.close)
 
         themeMenu = menubar.addMenu('Theme')
+        self._theme_actions = {}
+        theme_group = QActionGroup(self)
         for _theme_name in _THEMES:
             _action = themeMenu.addAction(_theme_name)
-            _action.triggered.connect(lambda checked=False, t=_theme_name: apply_theme(t))
+            _action.setCheckable(True)
+            theme_group.addAction(_action)
+            _action.triggered.connect(lambda checked=False, t=_theme_name: self.select_theme(t))
+            self._theme_actions[_theme_name] = _action
+        if _current_theme in self._theme_actions:
+            self._theme_actions[_current_theme].setChecked(True)
+
+    def select_theme(self, theme_name):
+        """Apply a theme and keep the Theme menu's check mark in sync."""
+        apply_theme(theme_name)
+        action = self._theme_actions.get(theme_name)
+        if action is not None:
+            action.setChecked(True)
+
+    def closeEvent(self, event):
+        """Confirm exit (any close path) and persist user preferences."""
+        reply = QMessageBox.question(
+            self, 'Exit', 'Are you sure you want to exit?\nAny unsaved changes will be lost.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            event.ignore()
+            return
+        settings = app_settings()
+        settings.setValue("window/geometry", self.saveGeometry())
+        settings.setValue("theme", _current_theme)
+        lib_page = self.page.get("LIBPage")
+        if lib_page is not None:
+            settings.setValue("libpage/middle_splitter", lib_page.middle_splitter.saveState())
+            settings.setValue("libpage/body_splitter", lib_page.body_splitter.saveState())
+        event.accept()
 
     def save_session(self, use_current_path=False):
         path = self.current_save_path if use_current_path else None
@@ -133,7 +176,7 @@ class BaseWindow(QMainWindow):
         if not path:
             return
         if theme_name in _THEMES:
-            apply_theme(theme_name)
+            self.select_theme(theme_name)
         self.setWindowTitle(f"Charlie's Proprietary LIB Offgas Modelling Tool - {path}")
 
 # Helper functions for shared UI behaviour such as theme switching and simple
@@ -157,73 +200,99 @@ def _make_toolbar_separator() -> QFrame:
     return sep
 
 
-def ask_to_close(self):
-    reply = QMessageBox.question(self, 'Exit', 'Are you sure you want to exit?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-    if reply == QMessageBox.Yes:
-        self.close()
-
-
 # Landing page that presents the main tools available in the application.
 class IntroPage(QWidget):
+    TOOLS = [
+        ("LIB Modelling Tool",
+         "Room off-gas concentrations assessed against LFL and ERPG-3 thresholds.",
+         "LIBPage"),
+        ("Sprinkler Activation Time",
+         "Time for a sprinkler head to activate under a growing fire.",
+         "SprinklerPage"),
+        ("Pool Spill & Fire Duration",
+         "Spill pool size and pool fire duration estimates. (In development)",
+         "PoolSpillPage"),
+        ("Receptor Heat Flux",
+         "Radiant heat flux received at a distance from a fire. (In development)",
+         "ReceptorHeatFluxPage"),
+    ]
+
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
 
-        # Create a label
-        label = QLabel("Welcome to the LIB Off-gassing Calculation Tool.\nPlease choose an option below to proceed.")
-        font = label.font()
-        font.setPointSize(26)
-        font.setBold(True)
-        label.setFont(font)
-        label.setAlignment(Qt.AlignCenter)
+        title = QLabel("LIB Off-gassing Calculation Tool")
+        title_font = title.font()
+        title_font.setPointSize(26)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setAlignment(Qt.AlignCenter)
 
-        # button to open main window
-        button = QPushButton("LIB Modelling Tool")
-        button.setToolTip("Click here to open the LIB Off-gassing Calculation Tool.")
-        button.clicked.connect(lambda: self.base_window.show_page("LIBPage"))
-        
-        # button to open to tutorial window
-        button2 = QPushButton("Tutorial")
-        button2.setToolTip("Click here to view the tutorial for using the LIB Off-gassing Calculation Tool.")
-        button2.clicked.connect(lambda: self.base_window.show_page("TutorialPage"))
-        
-        #button to open pool spill size and pool fire duration calculator window
-        button3 = QPushButton("Pool Spill & Fire Duration Calculator")
-        button3.setToolTip("Click here to open the Pool Spill & Fire Duration Calculator.")
-        button3.clicked.connect(lambda: self.base_window.show_page("PoolSpillPage"))
-        
-        button4 = QPushButton("Sprinkler Activation Time")
-        button4.setToolTip("Click here to open the Sprinkler Activation Time Calculator.")
-        button4.clicked.connect(lambda: self.base_window.show_page("SprinklerPage"))
-        
-        receptor = QPushButton("Receptor Heat Flux")
-        receptor.setToolTip("Click here to open the Receptor Heat Flux Calculator.")
-        receptor.clicked.connect(lambda: self.base_window.show_page("ReceptorHeatFluxPage"))
+        subtitle = QLabel("Choose a calculator below to get started.")
+        subtitle.setObjectName("introSubtitle")
+        subtitle_font = subtitle.font()
+        subtitle_font.setPointSize(13)
+        subtitle.setFont(subtitle_font)
+        subtitle.setAlignment(Qt.AlignCenter)
 
-        # Uniform font and size for all four action buttons
-        btn_font = QFont()
-        btn_font.setPointSize(13)
-        btn_font.setBold(True)
-        for btn in (button, button2, button3, button4, receptor):
-            btn.setMinimumSize(300, 110)
-            btn.setFont(btn_font)
-
-        # 2 × 2 grid so the buttons sit together at a consistent size
+        # 2 x 2 grid of card-style tool buttons
         btn_grid = QGridLayout()
         btn_grid.setSpacing(16)
-        btn_grid.addWidget(button,  0, 0)   # LIB Modelling Tool
-        btn_grid.addWidget(button4, 0, 1)   # Sprinkler Activation Time
-        btn_grid.addWidget(button3, 1, 0)   # Pool Spill & Fire
-        btn_grid.addWidget(button2, 2, 0, 1, 2)   # Tutorial
-        btn_grid.addWidget(receptor, 1, 1)  # Receptor Heat Flux (spans two columns)
+        for index, (name, description, page_name) in enumerate(self.TOOLS):
+            btn_grid.addWidget(self._tool_button(name, description, page_name),
+                               index // 2, index % 2)
 
-        # Outer layout: title + button grid
+        # Tutorial is a secondary action - full width but visually lighter
+        tutorial_button = QPushButton("Tutorial - learn the modelling workflow")
+        tutorial_button.setObjectName("tutorialButton")
+        tutorial_button.setMinimumHeight(44)
+        tutorial_button.setToolTip("Step-by-step guide to libraries, scenarios, "
+                                   "running calculations and exporting reports.")
+        tutorial_button.clicked.connect(lambda: self.base_window.show_page("TutorialPage"))
+
         layout = QVBoxLayout(self)
-        layout.setSpacing(28)
+        layout.setSpacing(18)
         layout.setContentsMargins(50, 36, 50, 36)
-        layout.addWidget(label)
+        layout.addStretch(1)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(10)
         layout.addLayout(btn_grid)
-        layout.addStretch()
+        layout.addWidget(tutorial_button)
+        layout.addStretch(2)
+
+    def _tool_button(self, name, description, page_name):
+        """Card-style button: bold tool name over a smaller description line."""
+        button = QPushButton()
+        button.setMinimumSize(300, 110)
+        button.setToolTip(f"Open the {name}.")
+        button.clicked.connect(lambda: self.base_window.show_page(page_name))
+
+        name_label = QLabel(name)
+        name_font = name_label.font()
+        name_font.setPointSize(14)
+        name_font.setBold(True)
+        name_label.setFont(name_font)
+
+        desc_label = QLabel(description)
+        desc_font = desc_label.font()
+        desc_font.setPointSize(10)
+        desc_label.setFont(desc_font)
+        desc_label.setWordWrap(True)
+
+        for label in (name_label, desc_label):
+            label.setAlignment(Qt.AlignCenter)
+            label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            label.setStyleSheet("background: transparent; border: none;")
+
+        button_layout = QVBoxLayout(button)
+        button_layout.setContentsMargins(18, 12, 18, 12)
+        button_layout.setSpacing(6)
+        button_layout.addStretch()
+        button_layout.addWidget(name_label)
+        button_layout.addWidget(desc_label)
+        button_layout.addStretch()
+        return button
 
 
 # Study tree node kinds. Stored on each item under NODE_TYPE_ROLE.
@@ -289,6 +358,15 @@ class GasCompositionDialog(QDialog):
 
         self.total_label = QLabel()
 
+        normalize_button = QPushButton("Normalize to 100%")
+        normalize_button.setToolTip("Scale every entered percentage so the total is exactly 100%.")
+        normalize_button.clicked.connect(self._normalize)
+
+        total_row = QHBoxLayout()
+        total_row.addWidget(self.total_label)
+        total_row.addStretch()
+        total_row.addWidget(normalize_button)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
@@ -296,7 +374,7 @@ class GasCompositionDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(name_form)
         layout.addWidget(scroll)
-        layout.addWidget(self.total_label)
+        layout.addLayout(total_row)
         layout.addWidget(buttons)
         self.resize(420, 620)
         self._update_total()
@@ -318,8 +396,24 @@ class GasCompositionDialog(QDialog):
             total = sum(self._percentages().values())
         except ValueError:
             self.total_label.setText("Total: invalid entry")
+            self.total_label.setStyleSheet("color: #c0392b; font-weight: bold;")
             return
         self.total_label.setText(f"Total: {total:.2f} %")
+        off_target = abs(total - 100.0) > 0.01
+        self.total_label.setStyleSheet(
+            "color: #c0392b; font-weight: bold;" if off_target else "")
+
+    def _normalize(self):
+        try:
+            values = self._percentages()
+        except ValueError:
+            return
+        total = sum(values.values())
+        if total <= 0:
+            return
+        for gas, edit in self._gas_edits.items():
+            value = values.get(gas, 0.0)
+            edit.setText(f"{value / total * 100.0:.6g}" if value else "0")
 
     def _on_accept(self):
         name = self.name_edit.text().strip()
@@ -701,6 +795,8 @@ class LIBPage(QWidget):
         super().__init__()
         self.base_window = base_window
         self.scenarios = ScenarioStore()   # owns every Scenario; tree items hold only node ids
+        self._copied_scenario = None
+        self._status_icons = {}            # has_result -> cached tree dot icon
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -723,7 +819,10 @@ class LIBPage(QWidget):
         libraries_button.clicked.connect(self.open_library_manager)
 
         run_button = QPushButton("Run")
-        run_button.setToolTip("Run the selected calculation method for the current scenarios.")
+        run_button.setObjectName("runButton")
+        run_button.setToolTip("Run the calculation. Scope follows the tree selection:\n"
+                              "a scenario runs alone, a group runs its scenarios,\n"
+                              "no selection runs everything.")
         run_button.clicked.connect(self.run_calc)
 
         clear_all = QPushButton("Clear All")
@@ -739,11 +838,6 @@ class LIBPage(QWidget):
         results_table.setToolTip("Open the results table builder for the current calculation results.")
         results_table.clicked.connect(self.open_results_table)
 
-        self.next_result_button = QPushButton("Next Result")
-        self.next_result_button.setToolTip("Switch to the next results tab and show its linked summary.")
-        self.next_result_button.clicked.connect(self.show_next_result)
-        self.next_result_button.setEnabled(False)
-
         toolbarlayout.addWidget(libraries_button)
         toolbarlayout.addWidget(_make_toolbar_separator())
         toolbarlayout.addWidget(run_button)
@@ -752,7 +846,6 @@ class LIBPage(QWidget):
         toolbarlayout.addWidget(export_to_pdf)
         toolbarlayout.addWidget(_make_toolbar_separator())
         toolbarlayout.addWidget(results_table)
-        toolbarlayout.addWidget(self.next_result_button)
         main_layout.addWidget(toolbar)
 
         # --- Body: vertical splitter (middle | bottom summary strip) ---
@@ -798,6 +891,7 @@ class LIBPage(QWidget):
 
         # Bottom: scrollable summary strip
         self.summary_scroll = QScrollArea()
+        self.summary_scroll.setObjectName("summaryResultsPanel")
         self.summary_scroll.setWidgetResizable(True)
         self.summary_scroll.setMinimumHeight(130)
         self.summary_scroll.setMaximumHeight(220)
@@ -815,6 +909,16 @@ class LIBPage(QWidget):
         body_splitter.setSizes([10000, 160])
         body_splitter.setStretchFactor(0, 1)
         body_splitter.setStretchFactor(1, 0)
+
+        # restore the user's last splitter layout (saved in BaseWindow.closeEvent)
+        self.middle_splitter = middle_splitter
+        self.body_splitter = body_splitter
+        settings = app_settings()
+        for splitter, key in ((middle_splitter, "libpage/middle_splitter"),
+                              (body_splitter, "libpage/body_splitter")):
+            state = settings.value(key)
+            if state is not None:
+                splitter.restoreState(state)
 
     # ------------------------------------------------------------------
     # Study tree — nodes hold no data of their own, only a NODE_ID_ROLE key
@@ -864,7 +968,12 @@ class LIBPage(QWidget):
         self.scenario_tree_inner = QTreeWidget()
         self.scenario_tree_inner.setObjectName("scenarioTreeInner")
         self.scenario_tree_inner.setHeaderHidden(True)
+        self.scenario_tree_inner.setToolTip(
+            "Double-click to edit, right-click for more options.\n"
+            "Ctrl+C / Ctrl+V copies and pastes scenarios between groups.")
         self.scenario_tree_inner.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
+        self.scenario_tree_inner.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.scenario_tree_inner.customContextMenuRequested.connect(self._show_tree_context_menu)
         copy_shortcut = QShortcut(QKeySequence.Copy, self.scenario_tree_inner)
         copy_shortcut.activated.connect(self._copy_selected_scenario)
         paste_shortcut = QShortcut(QKeySequence.Paste, self.scenario_tree_inner)
@@ -893,6 +1002,7 @@ class LIBPage(QWidget):
                 item = QTreeWidgetItem([scenario.name])
                 item.setData(0, NODE_TYPE_ROLE, NODE_SCENARIO)
                 item.setData(0, NODE_ID_ROLE, scenario.node_id)
+                item.setIcon(0, self._status_icon(scenario.summary is not None))
                 parent_item.addChild(item)
             parent_item.setExpanded(True)
             if select_group is not None and group_name == select_group:
@@ -902,6 +1012,58 @@ class LIBPage(QWidget):
                     child = parent_item.child(child_index)
                     if child.data(0, NODE_ID_ROLE) == select_node_id:
                         self.scenario_tree_inner.setCurrentItem(child)
+
+    def _status_icon(self, has_result):
+        """Small dot icon: filled green when the scenario has a stored result."""
+        icon = self._status_icons.get(has_result)
+        if icon is None:
+            pixmap = QPixmap(12, 12)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            if has_result:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor("#2e9e5b"))
+            else:
+                painter.setPen(QColor("#9aa0a6"))
+                painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(2, 2, 8, 8)
+            painter.end()
+            icon = QIcon(pixmap)
+            self._status_icons[has_result] = icon
+        return icon
+
+    def _refresh_tree_icons(self):
+        """Update every scenario item's result dot without rebuilding the tree."""
+        for group_index in range(self.scenario_tree_inner.topLevelItemCount()):
+            group_item = self.scenario_tree_inner.topLevelItem(group_index)
+            for child_index in range(group_item.childCount()):
+                child = group_item.child(child_index)
+                scenario = self.scenarios.get(child.data(0, NODE_ID_ROLE))
+                child.setIcon(0, self._status_icon(
+                    scenario is not None and scenario.summary is not None))
+
+    def _show_tree_context_menu(self, pos):
+        item = self.scenario_tree_inner.itemAt(pos)
+        menu = QMenu(self)
+        if item is None:
+            menu.addAction("Add Group", self._add_group_node)
+        else:
+            self.scenario_tree_inner.setCurrentItem(item)
+            if item.data(0, NODE_TYPE_ROLE) == NODE_SCENARIO:
+                node_id = item.data(0, NODE_ID_ROLE)
+                menu.addAction("Edit...", lambda: self._edit_scenario(node_id))
+                menu.addAction("Duplicate", lambda: self._duplicate_scenario(node_id))
+                menu.addAction("Run This Scenario", self.run_calc)
+                menu.addSeparator()
+                menu.addAction("Delete", self._remove_selected_node)
+            else:
+                menu.addAction("Add Scenario...", self._add_scenario_node)
+                menu.addAction("Rename...", lambda: self._rename_group(item))
+                menu.addAction("Run Group", self.run_calc)
+                menu.addSeparator()
+                menu.addAction("Delete Group", self._remove_selected_node)
+        menu.exec(self.scenario_tree_inner.viewport().mapToGlobal(pos))
 
     def _add_group_node(self):
         base_name, count = "New Group", 1
@@ -941,25 +1103,29 @@ class LIBPage(QWidget):
         self._refresh_tree(select_node_id=scenario.node_id)
 
     def _on_tree_item_double_clicked(self, item, _column):
-        if item.data(0, NODE_TYPE_ROLE) == NODE_GROUP:
-            old_name = item.text(0)
-            group_name, accepted = QInputDialog.getText(
-                self, "Rename Group", "Group name:", text=old_name
-            )
-            group_name = group_name.strip()
-            if not accepted or not group_name or group_name == old_name:
-                return
-            if not self.scenarios.rename_group(old_name, group_name):
-                QMessageBox.warning(self, "Rename Group",
-                                    f"A group named '{group_name}' already exists.")
-                return
-            self._refresh_tree(select_group=group_name)
-            return
-        if item.data(0, NODE_TYPE_ROLE) != NODE_SCENARIO:
+        node_type = item.data(0, NODE_TYPE_ROLE)
+        if node_type == NODE_GROUP:
+            self._rename_group(item)
+        elif node_type == NODE_SCENARIO:
+            self._edit_scenario(item.data(0, NODE_ID_ROLE))
+        else:
             item.setExpanded(not item.isExpanded())
-            return
 
-        node_id = item.data(0, NODE_ID_ROLE)
+    def _rename_group(self, item):
+        old_name = item.text(0)
+        group_name, accepted = QInputDialog.getText(
+            self, "Rename Group", "Group name:", text=old_name
+        )
+        group_name = group_name.strip()
+        if not accepted or not group_name or group_name == old_name:
+            return
+        if not self.scenarios.rename_group(old_name, group_name):
+            QMessageBox.warning(self, "Rename Group",
+                                f"A group named '{group_name}' already exists.")
+            return
+        self._refresh_tree(select_group=group_name)
+
+    def _edit_scenario(self, node_id):
         scenario = self.scenarios.get(node_id)
         if scenario is None:
             return
@@ -974,6 +1140,18 @@ class LIBPage(QWidget):
         self._apply_lib_spec(scenario)
         self._apply_flowrate_profile(scenario)
         self._refresh_tree(select_node_id=node_id)
+
+    def _duplicate_scenario(self, node_id):
+        scenario = self.scenarios.get(node_id)
+        if scenario is None:
+            return
+        inputs = copy.deepcopy(scenario.inputs)
+        inputs.scenario_description = f"Copy of {inputs.scenario_description}"
+        duplicate = self.scenarios.add(inputs, group=scenario.group)
+        self._apply_composition(duplicate)
+        self._apply_lib_spec(duplicate)
+        self._apply_flowrate_profile(duplicate)
+        self._refresh_tree(select_node_id=duplicate.node_id)
 
     def _copy_selected_scenario(self):
         item = self.scenario_tree_inner.currentItem()
@@ -1115,6 +1293,7 @@ class LIBPage(QWidget):
         self.scenarios.clear_results()
         self._clear_summary_stack()
         self._clear_result_tabs()
+        self._refresh_tree_icons()
 
     def _clear_summary_stack(self):
         while self.summary_stack.count() > 1:
@@ -1124,13 +1303,63 @@ class LIBPage(QWidget):
         self.summary_stack.setCurrentWidget(self._summary_placeholder)
 
     def _show_result_summary(self, title):
-        """Render the summary strip from every scenario's stored ResultSummary."""
-        summaries = [s.summary for s in self._scenarios_in_tree_order() if s.summary is not None]
-        if not summaries:
+        """Render the summary strip as one table row per stored ResultSummary."""
+        self._clear_summary_stack()
+        rows = [(s.node_id, s.summary) for s in self._scenarios_in_tree_order()
+                if s.summary is not None]
+        if not rows:
             self._show_summary(f"{title}: no results were produced.")
             return
-        blocks = ["\n".join(summary.summary_lines()) for summary in summaries]
-        self._show_summary("\n\n".join(blocks))
+
+        headers = ["Scenario", "Method", "Peak Flam. (v/v%)", "Peak Time (s)",
+                   "Assessment LFL (v/v%)", "LFL Reached", "Worst Toxic (% of ERPG-3)"]
+        table = QTableWidget(len(rows), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.setToolTip("Click a row to show that scenario's plots.")
+
+        for row, (_node_id, summary) in enumerate(rows):
+            lfl_text = f"{summary.lfl_percent:.3f}" if summary.lfl_percent else "-"
+            if not summary.lfl_percent:
+                reached_text = "-"
+            elif summary.lfl_crossing_time is not None:
+                reached_text = f"t={summary.lfl_crossing_time:.0f} s"
+            else:
+                reached_text = "Not reached"
+
+            worst = max((sp for sp in summary.toxic_species
+                         if sp.percent_of_erpg_3 is not None),
+                        key=lambda sp: sp.percent_of_erpg_3, default=None)
+            worst_text = (f"{worst.species.upper()}: {worst.percent_of_erpg_3:.0f}%"
+                          if worst is not None else "-")
+
+            values = [summary.scenario_name, summary.calc_method,
+                      f"{summary.peak_flammable_vv:.3f}",
+                      f"{summary.peak_flammable_time:.0f}",
+                      lfl_text, reached_text, worst_text]
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
+
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        node_ids = [node_id for node_id, _ in rows]
+        table.cellClicked.connect(lambda row, _col: self._focus_result_tab(node_ids[row]))
+
+        self.summary_stack.addWidget(table)
+        self.summary_stack.setCurrentWidget(table)
+
+    def _focus_result_tab(self, node_id):
+        """Bring the scenario's plot tab to the front (from a summary row click)."""
+        widget = self._result_tab_widgets.get(node_id)
+        if widget is None:
+            return
+        index = self.result_tabs.indexOf(widget)
+        if index != -1:
+            self.result_tabs.setCurrentIndex(index)
+            self.plot_stack.setCurrentWidget(self.result_tabs)
 
     def run_calc(self):
         from venting_calculation import run_venting_assessment, build_result_plots
@@ -1157,6 +1386,8 @@ class LIBPage(QWidget):
             if scenario is not None and scenario.summary is not None:
                 self._set_result_tab(node_id, scenario.name,
                                      build_result_plots(scenario.summary))
+
+        self._refresh_tree_icons()
 
     def _set_result_tab(self, node_id, label, widget):
         """Add the scenario's plot tab, replacing its previous one if it was run before."""
@@ -1203,6 +1434,7 @@ class LIBPage(QWidget):
             scenario.summary = None
         self._remove_result_tab(node_id)
         self._show_result_summary("Calculation Results")
+        self._refresh_tree_icons()
 
 
     def export_current_sheet_pdf(self):
@@ -1218,9 +1450,6 @@ class LIBPage(QWidget):
                                     "No scenarios have results yet - press Run first.")
             return
         open_results_table(self, scenarios)
-
-    def show_next_result(self):
-        pass
 
     def open_library_manager(self):
         dialog = LibraryManagerDialog(self, self.base_window)
@@ -1504,7 +1733,7 @@ class TutorialPage(QWidget):
             {
                 "icon": "💾",
                 "title": "Saving Sessions",
-                "content": "File > Save Session stores the whole program state - libraries, the study tree and every scenario's inputs - in a .libsave file. Calculation results are deliberately not saved: they are cheap to recompute, so simply press Run after opening a session."
+                "content": "File > Save (or Save As) stores the whole program state - libraries, the study tree and every scenario's inputs - in a .libsave file. Calculation results are deliberately not saved: they are cheap to recompute, so simply press Run after opening a session."
             },
             {
                 "icon": "🚨",
@@ -1756,7 +1985,8 @@ class ReceptorHeatFlux(QWidget):
                
 if __name__ == "__main__": 
     app = QApplication([])
-    apply_theme(_current_theme)
+    saved_theme = app_settings().value("theme", _current_theme)
+    apply_theme(saved_theme if saved_theme in _THEMES else _current_theme)
     window = BaseWindow()
 
     # Create pages

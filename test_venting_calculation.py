@@ -25,6 +25,7 @@ from venting_calculation import (
     room_gas_balance,
     system_propagation,
     temperature_adjusted_lfl,
+    weighted_delta_hc,
 )
 from information import (
     BATTERY_CHEMISTRY_DATA,
@@ -312,10 +313,31 @@ class LflTests(unittest.TestCase):
         self.assertEqual(label, "Le Chatelier LFL")
         self.assertAlmostEqual(lfl, CHEMICAL_PROPERTIES["h2"]["lfl"])
 
-    @unittest.expectedFailure
     def test_temperature_adjustment_changes_lfl(self):
-        """Known defect: temperature_adjusted_lfl currently multiplies by 1.0."""
-        self.assertNotEqual(temperature_adjusted_lfl(5.0, 200.0), 5.0)
+        # Default fallback delta_Hc = 384.4
+        # At 200°C: 5.0 - (0.75 / 384.4) * (200 - 25) = 5.0 - 0.34144 = 4.65856
+        adj = temperature_adjusted_lfl(5.0, 200.0)
+        self.assertNotEqual(adj, 5.0)
+        self.assertAlmostEqual(adj, 5.0 - (0.75 / 384.4) * 175.0, places=4)
+
+    def test_temperature_adjustment_at_25c_leaves_lfl_unchanged(self):
+        self.assertAlmostEqual(temperature_adjusted_lfl(5.0, 25.0), 5.0)
+
+    def test_weighted_delta_hc_calculation(self):
+        # Source values are kJ/mol; weighted_delta_hc returns kcal/mol.
+        fractions = {"benzene": 0.5, "co": 0.5}
+        expected_dh = (0.5 * 3268 + 0.5 * 384.4) * 0.2390057
+        self.assertAlmostEqual(weighted_delta_hc(fractions), expected_dh)
+
+    def test_resolve_lfl_with_temp_dependence(self):
+        inputs = LIBInputs(use_le_chatelier_lfl=False, use_temp_dependent_lfl=True)
+        spec = LIBSpec(lfl=5.0, venting_temperature=125.0)
+        fractions = {"benzene": 0.5, "co": 0.5}
+        lfl, label = resolve_lfl(inputs, spec, fractions)
+        self.assertEqual(label, "Temperature-adjusted LFL")
+        expected_dh = (0.5 * 3268 + 0.5 * 384.4) * 0.2390057
+        expected_lfl = 5.0 - (0.75 / expected_dh) * (125.0 - 25.0)
+        self.assertAlmostEqual(lfl, expected_lfl, places=4)
 
 
 class EmergencyVentilationTests(unittest.TestCase):
