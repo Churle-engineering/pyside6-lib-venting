@@ -103,6 +103,12 @@ class ReleaseModelDispatchTests(unittest.TestCase):
 
 
 class CellPropagationTests(unittest.TestCase):
+    def test_lib_time_step_is_fixed_to_one_second(self):
+        inputs = LIBInputs()
+
+        self.assertEqual(inputs.effective_time_step(), 1.0)
+        self.assertFalse(hasattr(inputs, "time_step"))
+
     def test_cohort_schedules_start_at_zero_and_cap_final_wave(self):
         self.assertEqual(
             _cohort_schedule(total_count=8, batch_size=3, interval=10),
@@ -121,7 +127,6 @@ class CellPropagationTests(unittest.TestCase):
             modules_per_unit=3,
             units=1,
             calc_duration=60,
-            time_step=1,
         )
         spec = LIBSpec(
             cell_volume=100.0,
@@ -145,7 +150,6 @@ class CellPropagationTests(unittest.TestCase):
             modules_per_unit=1,
             units=1,
             calc_duration=120,
-            time_step=0.25,
         )
         spec = LIBSpec(
             cell_volume=100.0,
@@ -168,7 +172,6 @@ class CellPropagationTests(unittest.TestCase):
             modules_per_unit=1,
             units=1,
             calc_duration=60,
-            time_step=1,
         )
         spec = LIBSpec(cell_volume=100.0, cell_duration=20.0)
 
@@ -196,7 +199,6 @@ class CellPropagationTests(unittest.TestCase):
             modules_per_unit=1,
             units=1,
             calc_duration=4000,
-            time_step=1,
         )
         short_spec = LIBSpec(cell_volume=0.5, cell_duration=30.0)
         long_spec = LIBSpec(cell_volume=0.5, cell_duration=3600.0)
@@ -213,7 +215,6 @@ class CellPropagationTests(unittest.TestCase):
             modules_per_unit=1,
             units=1,
             calc_duration=100,
-            time_step=1,
         )
         spec = LIBSpec(cell_volume=0.5, cell_duration=0.0)
 
@@ -229,7 +230,6 @@ class GasAccumulationTests(unittest.TestCase):
             room_height=2.0,
             room_area=5.0,
             equip_space=0.0,
-            time_step=1,
             ventilation_rate=0.0,
             emergency_vent_rate=0.0,
             vent_switch_conc=0.0,
@@ -256,12 +256,11 @@ class GasAccumulationTests(unittest.TestCase):
             room_height=1.0,
             room_area=1.0,
             equip_space=0.0,
-            time_step=2,
             ventilation_rate=1000.0,
             emergency_vent_rate=0.0,
             vent_switch_conc=0.0,
         )
-        time = np.array([0.0, 2.0, 4.0, 6.0])
+        time = np.array([0.0, 1.0, 2.0, 3.0])
         release_flow = np.array([0.0, 0.1, 0.1, 0.1])
 
         _, volume_m3, _ = room_gas_balance(
@@ -342,7 +341,7 @@ class LflTests(unittest.TestCase):
 
 class EmergencyVentilationTests(unittest.TestCase):
     def test_co_trigger_switches_to_the_higher_per_m2_rate(self):
-        common = dict(room_height=3.0, room_area=10.0, equip_space=0.0, time_step=1)
+        common = dict(room_height=3.0, room_area=10.0, equip_space=0.0)
         time = np.arange(0.0, 600.0, 1.0)
         release = np.full(len(time), 0.05)
         release[0] = 0.0

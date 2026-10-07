@@ -10,7 +10,7 @@ paper. Each test docstring shows the full hand calculation.
 To verify a calculation method you must specify, per case:
     LIBInputs   - room geometry (room_height, room_area, equip_space), ventilation
                   (ventilation_rate, emergency_vent_rate, vent_switch_conc), the grid
-                  (calc_duration, time_step), the system size (cells_per_module,
+                  (calc_duration, fixed 1 s time grid), the system size (cells_per_module,
                   modules_per_unit, units), calc_method, and the composition source.
     LIBSpec     - the release parameters the chosen method reads (cell_volume /
                   cell_duration, module_volume / module_duration, module_capacity +
@@ -68,7 +68,7 @@ def _base_inputs(**overrides):
     values = dict(
         room_height=2.0, room_area=50.0, equip_space=0.0,
         ventilation_rate=0.0, emergency_vent_rate=0.0, vent_switch_conc=0.0,
-        calc_duration=200, time_step=1,
+        calc_duration=200,
         cells_per_module=1, modules_per_unit=1, units=1,
         composition_method="User Defined",
     )

@@ -3,6 +3,7 @@
 # widget labels/units/tooltips come from each field's `metadata`, and values are
 # read back straight into a dataclass instance - there is no separate hand-typed
 # UI schema to keep in sync.
+import math
 from dataclasses import fields
 
 from PySide6.QtGui import QDoubleValidator
@@ -130,7 +131,10 @@ def read_form(dataclass_type, widgets):
             if f.type is float:
                 values[f.name] = float(raw)
             elif f.type is int:
-                values[f.name] = int(float(raw))
+                number = float(raw)
+                if not math.isfinite(number) or not number.is_integer():
+                    raise ValueError("Expected a finite whole number.")
+                values[f.name] = int(number)
             else:
                 values[f.name] = raw
         except ValueError as exc:

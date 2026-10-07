@@ -18,7 +18,9 @@ from typing import Optional
 
 import numpy as np
 
-from information import FlowrateProfile, GasComposition, LIBInputs, LIBSpec
+from information import (
+    CALC_METHOD_MODULE_VARIABLE_FLOWRATE, FlowrateProfile, GasComposition, LIBInputs, LIBSpec,
+)
 
 
 def _empty_2d():
@@ -66,9 +68,10 @@ class ScenarioResult:
 
     Everything derived from these (peaks, % of LFL, summary lines, plot curves) lives
     in ``venting_calculation.ResultSummary``, computed once per run and stored on the
-    scenario alongside this object. ``inputs`` and ``lib_spec`` are deep-copied
-    snapshots of what the run actually used, so a stored result stays interpretable
-    (and exportable) even after the user edits the scenario or battery afterwards.
+    scenario alongside this object. ``inputs``, ``lib_spec``, ``gas_composition``
+    and ``flowrate_profile`` are deep-copied snapshots of what the run actually used,
+    so a stored result stays interpretable (and exportable) after edits to the
+    scenario or libraries.
     """
 
     scenario_name: str
@@ -85,6 +88,8 @@ class ScenarioResult:
     lfl_percent: Optional[float] = None
     lfl_label: str = "LFL"
     lib_spec: Optional[LIBSpec] = None
+    gas_composition: GasComposition | None = None
+    flowrate_profile: FlowrateProfile | None = None
 
 
 @dataclass(slots=True)
@@ -93,9 +98,10 @@ class Scenario:
 
     ``result`` and ``summary`` are the outcome of the scenario's most recent run - a
     scenario has exactly one of each, produced by its own ``inputs.calc_method``, or
-    None if it has not been run this session (or its last run failed). Neither is
-    saved to session files: results are cheap to recompute, so Run is the only source
-    of them. ``gas_composition`` is the named ``GasComposition`` the user picked in the
+    None if it has not been run (or its last run failed). Session files store raw
+    results, including the run's input, battery, gas composition and flowrate snapshots;
+    summaries and plots are rebuilt from those results on load. ``gas_composition`` is the named
+    ``GasComposition`` the user picked in the
     scenario dialog (``LIBInputs.gas_composition`` stores only its name). ``lib_spec``
     is the named ``LIBSpec`` picked the same way (``LIBInputs.lib_spec`` stores only
     its name), and ``flowrate_profile`` the named ``FlowrateProfile``
@@ -114,6 +120,29 @@ class Scenario:
     @property
     def name(self):
         return self.inputs.scenario_description
+
+    @property
+    def results_out_of_date(self) -> bool:
+        """Compare current inputs/libraries with the stored run, including after load.
+
+        Missing snapshots in older sessions cannot establish that results are current.
+        Only libraries used by the calculation participate in the comparison.
+        """
+        result = self.result
+        if result is None:
+            return False
+        if (self.inputs != result.inputs or result.lib_spec is None
+                or self.lib_spec != result.lib_spec):
+            return True
+        if (self.inputs.composition_method == "User Defined"
+                and (result.gas_composition is None
+                     or self.gas_composition != result.gas_composition)):
+            return True
+        if (self.inputs.calc_method == CALC_METHOD_MODULE_VARIABLE_FLOWRATE
+                and (result.flowrate_profile is None
+                     or self.flowrate_profile != result.flowrate_profile)):
+            return True
+        return False
 
 
 @dataclass

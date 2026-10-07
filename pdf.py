@@ -9,7 +9,8 @@ report metadata and which scenarios to include, then writes a report with:
    ``TableOfContents`` build, so they stay accurate however long the report gets, and
 3. for each scenario, in study-tree order: an inputs page, then for the flammable
    and (where present) toxic results a landscape plot page followed by a portrait
-   summary-data page.
+   summary-data page. The input summary includes the named composition and species
+   percentages when the calculation used a user-defined gas composition.
 
 Figures are rebuilt offscreen with matplotlib's Agg backend straight from the same
 ``ResultSummary`` the on-screen plot tabs use, so the report matches the UI.
@@ -103,7 +104,11 @@ _ASSUMPTIONS = [
     "ventilation rate.",
     "An optional emergency ventilation rate activates while the room's carbon "
     "monoxide concentration is at or above the user-specified percentage of CO's "
-    "lower flammability limit. Both ventilation rates are specified per square "
+    "lower flammability limit, after the user-specified activation delay (default "
+    "0 seconds) from the first trigger. The countdown continues if CO falls below "
+    "the trigger; after the delay the standard rate applies whenever CO is below "
+    "the trigger. Activation is evaluated on the one-second calculation grid. "
+    "Both ventilation rates are specified per square "
     "metre of room floor area.",
     "Gas composition is taken from literature data, UL9540A flammability data, or a "
     "user-defined composition. Some species contribute to both the flammable and "
@@ -251,9 +256,15 @@ def _new_figure(title):
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Concentration (v/v %)")
     ax.grid(True, alpha=0.3)
-    ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
     return fig, ax
+
+
+def _set_xlim_from_time(ax, time):
+    """Span the full calculation duration. Limits must be set after plotting: setting
+    them on an empty axes freezes the default [0, 1] range and disables autoscaling."""
+    time = np.asarray(time, dtype=float)
+    if time.size and time[-1] > time[0]:
+        ax.set_xlim(float(time[0]), float(time[-1]))
 
 
 def _set_ylim_from_curves(ax, curves):
@@ -281,6 +292,7 @@ def _flammable_figure(summary):
             ax.plot([summary.time[0], summary.time[-1]], [lfl, lfl],
                     color=line.get_color(), linestyle="--", linewidth=1,
                     label=f"{species.species.upper()} LFL")
+    _set_xlim_from_time(ax, summary.time)
     _set_ylim_from_curves(ax, curves)
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     fig.tight_layout()
@@ -298,6 +310,7 @@ def _toxic_figure(summary):
                     [species.erpg_3 / 10000.0, species.erpg_3 / 10000.0],
                     color=line.get_color(), linestyle="--", linewidth=1,
                     label=f"{species.species.upper()} ERPG-3")
+    _set_xlim_from_time(ax, summary.time)
     _set_ylim_from_curves(ax, curves)
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     fig.tight_layout()
@@ -481,9 +494,18 @@ def _add_inputs_page(story, scenario, result, portrait_w):
         story.append(_table(_dataclass_rows(spec),
                             [200, 160, portrait_w - 360]))
 
-    composition = scenario.gas_composition
+    if result.inputs.composition_method != "User Defined":
+        return
+
+    composition = result.gas_composition
+    if composition is None:
+        # Older results have no snapshot; only use a library with the recorded name.
+        composition = scenario.gas_composition
+        if composition is not None and composition.name != result.inputs.gas_composition:
+            composition = None
     if composition is not None and composition.percentages:
-        rows = [[_header_cell("Species"), _header_cell("Share of Off-gas (%)")]]
+        rows: list[list[Paragraph | str]] = [
+            [_header_cell("Species"), _header_cell("Share of Off-gas (%)")]]
         for species, share in composition.percentages.items():
             if share and share > 0:
                 rows.append([species.upper(), _fmt(share)])
@@ -491,6 +513,10 @@ def _add_inputs_page(story, scenario, result, portrait_w):
             story.append(Paragraph(html.escape(f"Gas Composition: {composition.name}"),
                                    _STYLES["TableSection"]))
             story.append(_table(rows, [200, 160]))
+            if result.gas_composition is None:
+                story.append(Paragraph(
+                    "Composition shown from the current library; this saved result "
+                    "has no run-time composition snapshot.", _STYLES["ScenarioMeta"]))
 
 
 def _flammable_key_rows(result, summary):
@@ -723,5 +749,3 @@ def export_lib_report_pdf(lib_page, ordered_scenarios):
         return
     QMessageBox.information(lib_page, "Export PDF Report",
                             f"Report written to:\n{path}")
-
-

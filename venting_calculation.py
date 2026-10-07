@@ -42,7 +42,6 @@ from dataclasses import dataclass
 import copy
 
 import numpy as np
-from scipy.signal import lfilter
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PySide6.QtWidgets import (
@@ -50,6 +49,9 @@ from PySide6.QtWidgets import (
 )
 
 from scenario_model import GasResults, ScenarioResult
+from lib_validation import (
+    input_problems, lfl_input_problems, number_problems, release_problems, require_valid,
+)
 from information import (
     BATTERY_CHEMISTRY_DATA,
     CHEMICAL_PROPERTIES,
@@ -131,8 +133,8 @@ def cell_vent_profile(volume_l, duration=0.0):
     `volume_l` is the total gas volume the cell releases, in litres, so the resulting
     flowrate is in m3/s and integrates back to that volume.
     """
-    if volume_l <= 0:
-        raise ValueError("cell_vent_profile: volume must be positive")
+    require_valid(number_problems(volume_l, "Cell Volume", positive=True)
+                  + number_problems(duration, "Cell Duration"))
     if duration > 0:
         return CellRelease(volume_m3=volume_l / 1000.0, duration=float(duration))
 
@@ -282,6 +284,8 @@ def _build_measured_release(profile, cells_per_module):
 
     time = np.asarray(profile.time_s, dtype=np.float64)
     flowrate = np.asarray(profile.flowrate_lps, dtype=np.float64)
+    if time.ndim != 1 or flowrate.ndim != 1:
+        raise ValueError(f"flowrate dataset '{profile.name}' must contain one-dimensional samples")
     if time.size != flowrate.size:
         raise ValueError(
             f"flowrate dataset '{profile.name}' has {time.size} times but "
@@ -291,16 +295,20 @@ def _build_measured_release(profile, cells_per_module):
         raise ValueError(f"flowrate dataset '{profile.name}' needs at least two samples")
     if not np.all(np.isfinite(time)) or not np.all(np.isfinite(flowrate)):
         raise ValueError(f"flowrate dataset '{profile.name}' contains non-numeric samples")
+    if np.any(flowrate < 0):
+        raise ValueError(f"flowrate dataset '{profile.name}' contains negative flowrates")
 
     order = np.argsort(time)
     time = time[order] - time[order][0]
-    flowrate = np.clip(flowrate[order], 0.0, None) / 1000.0  # l/s -> m3/s
+    flowrate = flowrate[order] / 1000.0  # l/s -> m3/s
     if time[-1] <= 0:
         raise ValueError(f"flowrate dataset '{profile.name}' has no duration")
 
     steps = np.diff(time)
+    if not np.all(np.isfinite(time)) or np.any(steps <= 0):
+        raise ValueError(f"flowrate dataset '{profile.name}' needs distinct, finite sample times")
     cumulative = np.concatenate([[0.0], np.cumsum(0.5 * steps * (flowrate[1:] + flowrate[:-1]))])
-    if cumulative[-1] <= 0:
+    if not np.all(np.isfinite(cumulative)) or cumulative[-1] <= 0:
         raise ValueError(f"flowrate dataset '{profile.name}' releases no gas")
 
     return MeasuredModuleRelease(time=time, flowrate=flowrate, cumulative_m3=cumulative,
@@ -317,6 +325,9 @@ def build_module_release(scenario):
     inputs = scenario.inputs
     spec = scenario.lib_spec
     method = inputs.calc_method
+    if spec is None:
+        raise ValueError("No battery definition is assigned to this scenario.")
+    require_valid(release_problems(inputs, spec))
 
     if method == CALC_METHOD_CELL_VOLUME_UL9540A:
         cell_release = cell_vent_profile(spec.cell_volume, spec.cell_duration)
@@ -337,7 +348,7 @@ def build_module_release(scenario):
     else:
         raise ValueError(f"unsupported calculation method {method!r}")
 
-    if volume_l <= 0 or duration <= 0:
+    if not np.isfinite(volume_l) or volume_l <= 0 or duration <= 0:
         raise ValueError(
             f"'{method}' needs a positive release volume and duration "
             f"(got {volume_l} l over {duration} s)"
@@ -405,6 +416,7 @@ def system_propagation(inputs, spec, release, time_array=None):
     (`inputs.modules_per_unit * inputs.units`) has started; each replays `release`
     from its own start time.
     """
+    require_valid(input_problems(inputs) + release_problems(inputs, spec))
     total_modules = inputs.total_modules()
     if total_modules <= 0:
         raise ValueError("the scenario has no modules ('Modules per Unit' x 'Units' is 0)")
@@ -574,15 +586,11 @@ def resolve_lfl(inputs, spec, fractions):
     forgotten value fails loudly instead of silently steering the assessment.
     Temperature adjustment is then applied to the single selected value.
     """
+    require_valid(lfl_input_problems(inputs, spec))
     if inputs.use_le_chatelier_lfl:
         lfl = le_chatelier_lfl(fractions)
         label = "Le Chatelier LFL"
     else:
-        if spec.lfl is None or spec.lfl <= 0:
-            raise ValueError(
-                f"battery '{spec.name}' has no LFL entered; set a positive LFL in the "
-                "battery definition or enable 'Use Le Chatelier LFL' on the scenario"
-            )
         lfl = spec.lfl
         label = "LFL"
 
@@ -590,6 +598,9 @@ def resolve_lfl(inputs, spec, fractions):
         lfl = temperature_adjusted_lfl(lfl, spec.venting_temperature, fractions=fractions)
         label = f"Temperature-adjusted {label}"
 
+    # No combustible species is a valid nonflammable scenario, not an invalid LFL.
+    if lfl is not None:
+        require_valid(number_problems(lfl, "Assessment LFL", positive=True, maximum=100))
     return lfl, label
 
 
@@ -618,13 +629,17 @@ def room_gas_balance(inputs, time, release_flowrate, fractions):
     dimension from the time loop.
 
     Ventilation: the standard rate applies until the room's CO concentration reaches
-    `inputs.vent_switch_conc` percent of CO's own LFL, then the emergency rate applies
-    (not latched - the standard rate resumes if CO falls back below the trigger).
+    `inputs.vent_switch_conc` percent of CO's own LFL. The emergency rate can apply
+    after `inputs.emergency_vent_delay` seconds from that first trigger, even if CO
+    drops below the trigger during the countdown. Once the delay expires, the rate
+    is not latched - the standard rate resumes if CO falls below the trigger.
+    Activation is evaluated at interval starts on the one-second grid.
     Both rates are entered in L/s per m2 of room floor area.
 
     Returns (species, volume_m3, conc_vv) where the two arrays are shaped
     (n_species, n_steps).
     """
+    require_valid(input_problems(inputs))
     species = list(fractions)
     fraction_arr = np.array([fractions[s] for s in species], dtype=np.float64)
     room_volume = inputs.room_volume()
@@ -640,11 +655,14 @@ def room_gas_balance(inputs, time, release_flowrate, fractions):
     base_retained, base_inflow_factor = _step_coefficients(base_rate, room_volume, dt)
 
     if not trigger_enabled:
-        # constant extraction: the per-step recurrence pool[n] = r*pool[n-1] + g*q[n]
-        # is a linear filter, solved for the whole array in one vectorized pass
-        inflow = np.asarray(release_flowrate, dtype=np.float64).copy()
-        inflow[0] = 0.0
-        pool = lfilter([base_inflow_factor], [1.0, -base_retained], inflow)
+        # constant extraction: pool[n] = r*pool[n-1] + g*q[n]. A plain loop over a
+        # Python list is exact and fast enough (~25 ms for 24 h of 1 s steps), and
+        # avoids bundling scipy just for scipy.signal.lfilter.
+        inflow = np.asarray(release_flowrate, dtype=np.float64).tolist()
+        current = 0.0
+        for step in range(1, len(time)):
+            current = current * base_retained + inflow[step] * base_inflow_factor
+            pool[step] = current
     else:
         # the emergency-vent switch re-evaluates every step (not latched), so the rate
         # depends on the evolving CO concentration - but only the scalar unsplit pool
@@ -653,9 +671,14 @@ def room_gas_balance(inputs, time, release_flowrate, fractions):
             emergency_rate, room_volume, dt)
         trigger = CHEMICAL_PROPERTIES['co']['lfl'] * inputs.vent_switch_conc / 100.0
         current = 0.0
+        trigger_time = None
         for step in range(1, len(time)):
+            interval_start = time[step - 1]
             co_conc = co_fraction * (current / room_volume) * 100.0
-            if co_conc >= trigger:
+            if co_conc >= trigger and trigger_time is None:
+                trigger_time = interval_start
+            if (co_conc >= trigger and trigger_time is not None
+                    and interval_start - trigger_time >= inputs.emergency_vent_delay):
                 retained, inflow_factor = emergency_retained, emergency_inflow_factor
             else:
                 retained, inflow_factor = base_retained, base_inflow_factor
@@ -709,6 +732,9 @@ def run_venting_assessment(parent, store, gas_data, node_ids=None):
             continue
 
         try:
+            require_valid(input_problems(inputs)
+                          + release_problems(inputs, scenario.lib_spec)
+                          + lfl_input_problems(inputs, scenario.lib_spec))
             fractions = resolve_composition(scenario)
             release = build_module_release(scenario)
             prop = system_propagation(inputs, scenario.lib_spec, release)
@@ -739,6 +765,11 @@ def run_venting_assessment(parent, store, gas_data, node_ids=None):
             lfl_percent=assessment_lfl,
             lfl_label=lfl_label,
             lib_spec=copy.deepcopy(scenario.lib_spec),
+            gas_composition=(copy.deepcopy(scenario.gas_composition)
+                             if inputs.composition_method == "User Defined" else None),
+            flowrate_profile=(copy.deepcopy(scenario.flowrate_profile)
+                              if inputs.calc_method == CALC_METHOD_MODULE_VARIABLE_FLOWRATE
+                              else None),
         )
 
         scenario.result = result
@@ -903,6 +934,26 @@ def summarize_result(result, gas_data):
 # Plotting
 # ---------------------------------------------------------------------------
 
+class _ResultCanvas(FigureCanvasQTAgg):
+    """Plot canvas that postpones redraws while hidden (e.g. on a background result
+    tab) and performs a single redraw when it is next shown, so updating many result
+    tabs at once never re-renders plots nobody can see."""
+
+    _redraw_on_show = False
+
+    def draw_idle(self):
+        if self.isVisible():
+            super().draw_idle()
+        else:
+            self._redraw_on_show = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._redraw_on_show:
+            self._redraw_on_show = False
+            super().draw_idle()
+
+
 def _make_plot_tab(x_label, y_label, title):
     """Bare figure/canvas/toolbar/checkbox-row scaffold shared by both gas plot tabs."""
     figure = Figure(figsize=(6, 4))
@@ -911,8 +962,14 @@ def _make_plot_tab(x_label, y_label, title):
     axes.set_ylabel(y_label)
     axes.set_title(title)
     axes.grid(True, alpha=0.3)
+    axes.text(
+        0.5, 0.5, "RESULTS OUT OF DATE\nRerun scenario to update",
+        transform=axes.transAxes, ha="center", va="center", rotation=20,
+        fontsize=22, weight="bold", color="darkred", alpha=0.55,
+        zorder=100, clip_on=True, visible=False, gid="results-out-of-date",
+    )
 
-    canvas = FigureCanvasQTAgg(figure)
+    canvas = _ResultCanvas(figure)
     toolbar = NavigationToolbar2QT(canvas)
 
     checkbox_row = QWidget()
@@ -1040,6 +1097,19 @@ def _build_toxic_tab(summary):
     figure.tight_layout()
     _add_checkboxes(checkbox_layout, axes, canvas, entries)
     return tab
+
+
+def set_result_plots_out_of_date(widget: QWidget, out_of_date: bool) -> None:
+    """Update both gas plots without replacing curves or their display controls."""
+    for canvas in widget.findChildren(FigureCanvasQTAgg):
+        changed = False
+        for axes in canvas.figure.axes:
+            for text in axes.texts:
+                if text.get_gid() == "results-out-of-date" and text.get_visible() != out_of_date:
+                    text.set_visible(out_of_date)
+                    changed = True
+        if changed:
+            canvas.draw_idle()
 
 
 def build_result_plots(summary):

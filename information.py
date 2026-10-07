@@ -56,13 +56,6 @@ class LIBInputs:
                   "tooltip": "The duration of the calculation in seconds."
                   }
     )
-    time_step: int = field(
-        default=1,
-        metadata={"label": "Time Step",
-                  "units": 's',
-                  "tooltip": "The simulation time step. Larger steps degrade accuracy of the gas balance."
-                  }
-    )
     ventilation_rate: float = field(
         default=5.0,
         metadata={"label": "Ventilation Rate",
@@ -143,7 +136,7 @@ class LIBInputs:
         metadata={"label": "Vent Switch Concentration",
                   "units": '% of CO LFL',
                     "tooltip": "Room CO concentration, as a percentage of CO's own LFL, at which\n"
-                               "ventilation switches to the emergency rate (not latched: it returns\n"
+                               "the emergency activation delay starts (not latched: it returns\n"
                                "to the standard rate if CO falls back below the trigger).\n"
                                "Set to 0 to disable emergency ventilation."
                     } 
@@ -162,6 +155,16 @@ class LIBInputs:
                   "tooltip": "Adjust CO, H2 and total hydrocarbon LFLs for the venting temperature."
                   }
     )
+    emergency_vent_delay: float = field(
+        default=0.0,
+        metadata={"label": "Emergency Vent Activation Delay",
+                  "units": 's',
+                  "tooltip": "Delay from the first CO trigger before the emergency rate can apply.\n"
+                             "The countdown continues if CO drops below the trigger; after the\n"
+                             "delay, the emergency rate applies only while CO is at or above it.\n"
+                             "Activation uses the next 1-second calculation step. Set to 0 for no delay."
+                  }
+    )
 
     # Derived values live here so every calculation module agrees on how they are
     # computed, rather than each re-deriving them from the raw fields.
@@ -174,7 +177,8 @@ class LIBInputs:
         return self.modules_per_unit * self.units
 
     def effective_time_step(self) -> float:
-        return float(self.time_step) if self.time_step > 0 else 1.0
+        """The LIB simulation uses a fixed one-second time step."""
+        return 1.0
 
 
 @dataclass
@@ -360,10 +364,11 @@ BATTERY_CHEMISTRY_DATA = {
         # 141.9%, so every species below was scaled by 100/141.9 to total 100%.
         'composition': {
             'co': 42.29,  # Carbon monoxide
+            'co2': 7.05,  # Carbon dioxide
             'h2': 7.05,       # Hydrogen
             'thc': 7.05,  # Total hydrocarbons
             'no2': 6.84,               # Nitrogen dioxide
-            'hcl': 6.84,               # Hydrogen chloride
+            'hcl': 1,               # Hydrogen chloride
             'hf': 2.61,                # Hydrogen fluoride
             'hcn': 0.49,               # Hydrogen cyanide
             'benzene': 9.58,          # Benzene

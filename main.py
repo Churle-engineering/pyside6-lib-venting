@@ -11,17 +11,27 @@ from information import (FIRE_PROPERTIES, POOL_SPREAD_DATA, LIB_TYPE, CELL_FORMA
                          FlowrateProfile, GasComposition, LIBInputs, LIBSpec,
                          CALC_METHOD_MODULE_VARIABLE_FLOWRATE)
 import copy
+import math
 import os
+from importlib import import_module
 from dataclass_forms import build_tabbed_form, read_form
+from lib_validation import input_problems
 from scenario_model import ScenarioStore
 from sprinkler import activation_time_Calc
 from saveload import save_program_state, load_program_state
 
+calculate_pool_assessment = import_module("spill_poolfire").calculate_pool_assessment
 
 
 # to do's:
-# add a calculation method to the input of the pdf report.
-# make it so that 1 second timesteps are always used for the quick caluclations. Big time steps can mess it up
+# update le chateliers lfl calculation to use all gas and account for the non-flammable components
+# variable flowrate calculation needs fixing and checking.
+# stop auto normalsing the off gas composition. Should only happen upon user selection.
+# something to notify the user if the composition changes or drops back to literature.
+# add separate cumulative generated gas 
+# implement battery charge relationship to stuff.
+
+
 # need to decouple timestep from number of printed sheets
 # make data tables optional for the pdf export
 # add an input into the windows that specifies the project that is being run. Make it optional but helps to track what data is what.
@@ -210,7 +220,7 @@ class IntroPage(QWidget):
          "Time for a sprinkler head to activate under a growing fire.",
          "SprinklerPage"),
         ("Pool Spill & Fire Duration",
-         "Spill pool size and pool fire duration estimates. (In development)",
+         "Provisional spill pool size and pool fire duration estimates.",
          "PoolSpillPage"),
         ("Receptor Heat Flux",
          "Radiant heat flux received at a distance from a fire. (In development)",
@@ -501,8 +511,8 @@ class ScenarioInputDialog(QDialog):
                      "calc_method", "composition_method", "gas_composition",
                      "flowrate_profile"]),
         ("Room Details", ["room_height", "room_area", "equip_space", "ventilation_rate",
-                           "emergency_vent_rate", "vent_switch_conc"]),
-        ("Calculation", ["calc_duration", "time_step", "use_le_chatelier_lfl",
+                           "emergency_vent_rate", "emergency_vent_delay", "vent_switch_conc"]),
+        ("Calculation", ["calc_duration", "use_le_chatelier_lfl",
                           "use_temp_dependent_lfl"]),
     ]
 
@@ -555,7 +565,7 @@ class ScenarioInputDialog(QDialog):
 
     def _validation_problems(self, inputs):
         """Configuration contradictions that would make the run fail later."""
-        problems = []
+        problems = input_problems(inputs)
         if inputs.lib_spec == NO_LIB:
             problems.append("Select a battery ('Battery (LIB)') - create one with 'Add LIB' first.")
         if (inputs.calc_method == CALC_METHOD_MODULE_VARIABLE_FLOWRATE
@@ -1140,6 +1150,7 @@ class LIBPage(QWidget):
         self._apply_lib_spec(scenario)
         self._apply_flowrate_profile(scenario)
         self._refresh_tree(select_node_id=node_id)
+        self._refresh_result_watermarks()
 
     def _duplicate_scenario(self, node_id):
         scenario = self.scenarios.get(node_id)
@@ -1223,15 +1234,18 @@ class LIBPage(QWidget):
     def restore_tree(self, groups):
         """Replace the scenario store from a snapshot and redraw the tree from it.
 
-        Results are not saved to session files, so the results panel starts empty
-        after a load - press Run to recompute them from the restored inputs.
+        Rebuild summaries and plots from saved results, not from current inputs.
+        Older input-only sessions still start with an empty results panel.
         """
+        from venting_calculation import build_result_plots, summarize_result
+
         self._clear_result_tabs()
         self._clear_summary_stack()
         self.scenarios = ScenarioStore()
+        self._copied_scenario = None
 
         for group in groups or []:
-            group_name = group.get("name") or "New Group"
+            group_name = group.get("name", "")
             self.scenarios.add_group(group_name)
             for scenario in group.get("scenarios") or []:
                 scenario.group = group_name
@@ -1240,8 +1254,89 @@ class LIBPage(QWidget):
                 self._apply_composition(scenario)
                 self._apply_lib_spec(scenario)
                 self._apply_flowrate_profile(scenario)
+                scenario.summary = (
+                    summarize_result(scenario.result, CHEMICAL_PROPERTIES)
+                    if scenario.result is not None else None
+                )
+                if scenario.summary is not None:
+                    self._set_result_tab(scenario.node_id, scenario.name,
+                                         build_result_plots(scenario.summary))
 
         self._refresh_tree()
+        if any(s.summary is not None for s in self.scenarios):
+            self._show_result_summary("Saved Calculation Results")
+
+    def session_snapshot(self):
+        """Capture presentation choices separately from the scenario records."""
+        tree = self.scenario_tree_inner
+        selected = tree.currentItem()
+        plots = []
+        node_ids = {widget: node_id for node_id, widget in self._result_tab_widgets.items()}
+        for index in range(self.result_tabs.count()):
+            widget = self.result_tabs.widget(index)
+            if not isinstance(widget, QTabWidget):
+                raise TypeError("Scenario plots must be tab widgets.")
+            checkboxes = []
+            for tab in range(widget.count()):
+                plot_tab = widget.widget(tab)
+                assert plot_tab is not None
+                checkboxes.append({
+                    box.text(): box.isChecked() for box in plot_tab.findChildren(QCheckBox)
+                })
+            plots.append({
+                "node_id": node_ids[widget],
+                "active_tab": widget.currentIndex(),
+                "checkboxes": checkboxes,
+            })
+        expanded_groups = {}
+        for index in range(tree.topLevelItemCount()):
+            group = tree.topLevelItem(index)
+            assert group is not None
+            expanded_groups[group.text(0)] = group.isExpanded()
+        return {
+            "selected_node_id": (
+                selected.data(0, NODE_ID_ROLE)
+                if selected is not None and selected.data(0, NODE_TYPE_ROLE) == NODE_SCENARIO
+                else None
+            ),
+            "selected_group": (
+                selected.text(0)
+                if selected is not None and selected.data(0, NODE_TYPE_ROLE) == NODE_GROUP
+                else None
+            ),
+            "expanded_groups": expanded_groups,
+            "plots": plots,
+            "active_result": node_ids.get(self.result_tabs.currentWidget()),
+        }
+
+    def restore_session(self, state):
+        tree = self.scenario_tree_inner
+        for index in range(tree.topLevelItemCount()):
+            group = tree.topLevelItem(index)
+            assert group is not None
+            group.setExpanded(state.get("expanded_groups", {}).get(group.text(0), True))
+            if group.text(0) == state.get("selected_group"):
+                tree.setCurrentItem(group)
+            for child_index in range(group.childCount()):
+                child = group.child(child_index)
+                assert child is not None
+                if child.data(0, NODE_ID_ROLE) == state.get("selected_node_id"):
+                    tree.setCurrentItem(child)
+
+        for index, plot in enumerate(state.get("plots", [])):
+            widget = self._result_tab_widgets.get(plot["node_id"])
+            if widget is None:
+                continue
+            current_index = self.result_tabs.indexOf(widget)
+            self.result_tabs.tabBar().moveTab(current_index, index)
+            for tab, checkboxes in enumerate(plot.get("checkboxes", [])):
+                if tab >= widget.count():
+                    break
+                for box in widget.widget(tab).findChildren(QCheckBox):
+                    if box.text() in checkboxes:
+                        box.setChecked(checkboxes[box.text()])
+            widget.setCurrentIndex(plot.get("active_tab", 0))
+        self._focus_result_tab(state.get("active_result"))
 
     # ------------------------------------------------------------------
     # Gas compositions
@@ -1312,7 +1407,8 @@ class LIBPage(QWidget):
             return
 
         headers = ["Scenario", "Method", "Peak Flam. (v/v%)", "Peak Time (s)",
-                   "Assessment LFL (v/v%)", "LFL Reached", "Worst Toxic (% of ERPG-3)"]
+               "Assessment LFL (v/v%)", "25% LFL Reached", "Worst Toxic (% of ERPG-3)",
+               "Worst Toxic (mg/L)", "Worst Toxic (ppm)"]
         table = QTableWidget(len(rows), len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1323,23 +1419,30 @@ class LIBPage(QWidget):
 
         for row, (_node_id, summary) in enumerate(rows):
             lfl_text = f"{summary.lfl_percent:.3f}" if summary.lfl_percent else "-"
+            quarter_lfl_time = next(
+                (time for time, percent in zip(summary.time, summary.percent_of_lfl_curve)
+                 if percent >= 25.0),
+                None,
+            )
             if not summary.lfl_percent:
-                reached_text = "-"
-            elif summary.lfl_crossing_time is not None:
-                reached_text = f"t={summary.lfl_crossing_time:.0f} s"
+                quarter_lfl_text = "-"
+            elif quarter_lfl_time is not None:
+                quarter_lfl_text = f"t={quarter_lfl_time:.0f} s"
             else:
-                reached_text = "Not reached"
+                quarter_lfl_text = "Not reached"
 
             worst = max((sp for sp in summary.toxic_species
                          if sp.percent_of_erpg_3 is not None),
                         key=lambda sp: sp.percent_of_erpg_3, default=None)
             worst_text = (f"{worst.species.upper()}: {worst.percent_of_erpg_3:.0f}%"
                           if worst is not None else "-")
+            worst_mgl_text = f"{worst.peak_mgl:.3f}" if worst is not None else "-"
+            worst_ppm_text = f"{worst.peak_ppm:.0f}" if worst is not None else "-"
 
             values = [summary.scenario_name, summary.calc_method,
                       f"{summary.peak_flammable_vv:.3f}",
                       f"{summary.peak_flammable_time:.0f}",
-                      lfl_text, reached_text, worst_text]
+                      lfl_text, quarter_lfl_text, worst_text, worst_mgl_text, worst_ppm_text]
             for column, value in enumerate(values):
                 table.setItem(row, column, QTableWidgetItem(value))
 
@@ -1387,7 +1490,20 @@ class LIBPage(QWidget):
                 self._set_result_tab(node_id, scenario.name,
                                      build_result_plots(scenario.summary))
 
+        for node_id in list(self._result_tab_widgets):
+            scenario = self.scenarios.get(node_id)
+            if scenario is None or scenario.result is None:
+                self._remove_result_tab(node_id)
+        self._refresh_result_watermarks()
         self._refresh_tree_icons()
+
+    def _refresh_result_watermarks(self):
+        from venting_calculation import set_result_plots_out_of_date
+
+        for node_id, widget in self._result_tab_widgets.items():
+            scenario = self.scenarios.get(node_id)
+            if scenario is not None:
+                set_result_plots_out_of_date(widget, scenario.results_out_of_date)
 
     def _set_result_tab(self, node_id, label, widget):
         """Add the scenario's plot tab, replacing its previous one if it was run before."""
@@ -1401,6 +1517,7 @@ class LIBPage(QWidget):
         self._result_tab_widgets[node_id] = widget
         self.result_tabs.setCurrentIndex(self.result_tabs.addTab(widget, label))
         self.plot_stack.setCurrentWidget(self.result_tabs)
+        self._refresh_result_watermarks()
 
     def _clear_result_tabs(self):
         while self.result_tabs.count():
@@ -1459,6 +1576,7 @@ class LIBPage(QWidget):
             self._apply_composition(scenario)
             self._apply_lib_spec(scenario)
             self._apply_flowrate_profile(scenario)
+        self._refresh_result_watermarks()
 
 
 # Page for calculating sprinkler activation times from the supplied inputs.
@@ -1664,6 +1782,19 @@ class SprinklerPage(QWidget):
         activation_duration_text = f"{self.last_activation_time_s:.1f} s"
         QApplication.clipboard().setText(activation_duration_text)
 
+    def session_snapshot(self):
+        return {
+            "activation_time_s": self.last_activation_time_s,
+            "results_text": self.results_label.text(),
+        }
+
+    def restore_session(self, state):
+        self.last_activation_time_s = state.get("activation_time_s")
+        self.copy_activation_button.setEnabled(self.last_activation_time_s is not None)
+        self.results_label.setText(state.get(
+            "results_text", "Results will appear here after running the calculation."
+        ))
+
     def clear_inputs(self):
         self.sprinkler_id.clear()
         self.ceiling_height.clear()
@@ -1701,56 +1832,61 @@ class TutorialPage(QWidget):
               # Tutorial sections
         sections = [
             {
-                "icon": "🚀",
-                "title": "Getting Started",
-                "content": "Welcome to the Battery Off-gassing Calculation Tool! This application helps you assess toxicity and flammability risks from lithium-ion battery thermal runaway events.\nThe basic workflow is: define your batteries in Libraries, build scenarios in the study tree, press Run, then review the plots and summary before exporting a PDF report."
+                      "icon": "1.",
+                      "title": "LIB Off-gassing: User Workflow",
+                      "content": "Use the LIB Modelling Tool for a room-level estimate of off-gas concentrations from a lithium-ion battery thermal-runaway release. Work through the steps below: (1) define the battery and, if needed, gas composition and flowrate data in Libraries; (2) create a group and scenario; (3) enter the battery-system, room, ventilation and calculation inputs; (4) run the scenario or a selected group; and (5) review the plots and summaries, then export a PDF report if required. Check every input and assumption against the project-specific evidence before interpreting results."
             },
             {
-                "icon": "📚",
-                "title": "Libraries",
-                "content": "The 'Libraries' button manages the three kinds of named objects scenarios reference:\n• Batteries (LIB): the cell/module volumes, durations, LFL and propagation behaviour of one battery product\n• Gas Compositions: a named percentage split of the off-gas into chemical species\n• Flowrate Datasets: measured module flowrate curves imported from CSV\nDefine an object once, then any number of scenarios can select it by name. Editing a library object updates every scenario that references it."
+                      "icon": "2.",
+                      "title": "Prepare Libraries",
+                      "content": "Open Libraries and define the objects your scenarios will use:\n• Batteries (LIB): enter the chemistry, cell format, state of charge, venting temperature, LFL, cell/module release data and propagation settings using the available project or test data.\n• Gas Compositions: choose Literature Data or create a User Defined percentage split of off-gas species. Confirm that the selected composition is appropriate for the battery and test basis.\n• Flowrate Datasets: import a two-column CSV (time in seconds, flowrate in L/s) describing ONE module. This is required only for the Module Variable Flowrate method; the dataset supplies the release profile and duration, while the scenario supplies composition.\nA named library object can be reused by multiple scenarios. Editing it affects scenarios that reference it, so review and rerun results after changing library data."
             },
             {
-                "icon": "📝",
-                "title": "Creating Scenarios",
-                "content": "1. Press '+ Group' to create a group (e.g. a design option or room)\n2. With the group selected, press '+' to add a scenario\n3. Fill in the scenario dialog: pick the battery, counts, room details and the Calculation Method\n4. Double-click a scenario to edit it, or a group to rename it\n5. Ctrl+C / Ctrl+V copies and pastes scenarios between groups"
+                      "icon": "3.",
+                      "title": "Create and Configure Scenarios",
+                      "content": "In the study tree, press '+ Group' to organise cases (for example by room or design option), select a group and press '+' to add a scenario. Enter the scenario description and manufacturer, select a Battery (LIB), and enter cells per module, modules per unit and number of units. Then set room height and floor area, the equipment-occupied percentage, standard ventilation rate and calculation duration. The off-gassing calculation uses a fixed 1-second time step. Use consistent units as shown beside each field. Room dimensions, free room volume and calculation duration must be positive; equipment occupancy must be at least 0% and less than 100%. Counts must be positive whole numbers. Ventilation rates and the emergency trigger must be non-negative: zero standard ventilation models a sealed room, and zero emergency ventilation or trigger disables emergency extraction. The engine repeats validation for loaded scenarios and reports invalid cases as skipped. Release volumes/capacities and module durations must be positive for the selected method; zero cell duration uses the empirical curve, and zero propagation delay is allowed. An entered or temperature-adjusted LFL must be finite, greater than 0% and no more than 100%. Double-click a scenario to edit it or a group to rename it; Ctrl+C / Ctrl+V copies scenarios between groups."
             },
             {
-                "icon": "🧪",
-                "title": "Running Calculations",
-                "content": "Press Run to calculate. The selection controls the scope: a selected scenario runs alone, a selected group runs its scenarios, and no selection runs everything.\nEvery scenario runs through the same pipeline; only its Calculation Method changes how one module releases gas:\n• Cell Volume UL9540A: cells inside each module initiate in staggered waves, each following an empirical release curve (or a flat rate if a measured Cell Duration is entered)\n• Module Volume UL9540A: each module releases its UL9540A test volume at a constant rate\n• Module Capacity: the volume comes from literature specific-capacity data (L/kWh) times the module capacity\n• Module Variable Flowrate: each module replays an imported measured flowrate dataset\nModules always initiate in staggered waves set by the battery's module propagation delay and number."
+                      "icon": "4.",
+                      "title": "Choose the Off-gas Release Method and Run",
+                      "content": "Select a Composition Method and Calculation Method in the scenario. The release method describes one cell or module; module-to-module propagation then staggers the release across the system using the battery's propagation delay and number of modules initiated in each wave.\n• Cell Volume UL9540A: cells initiate in staggered cohorts. Each cell releases its entered volume along the empirical rise/decay curve when Cell Duration is 0, or at a constant rate over the entered duration when it is non-zero.\n• Module Volume UL9540A: one module's entered test volume is released at a constant rate over its entered duration.\n• Module Capacity: module capacity (kWh) is multiplied by the chemistry- and cell-format-specific literature value (L/kWh); this volume is released at a constant rate over the module duration.\n• Module Variable Flowrate: each module replays the selected measured dataset, which defines its flowrate and duration.\nPress Run to calculate. A selected scenario runs by itself, a selected group runs its scenarios, and with no selection all scenarios run."
             },
             {
-                "icon": "📊",
-                "title": "Results",
-                "content": "Each run adds one tab per scenario with a Flammable Gas and a Toxic Gas plot; checkboxes toggle individual species and their threshold lines (per-species LFLs, ERPG-3).\nThe strip along the bottom summarises every stored result: peak flammable concentration, the assessment LFL and when (or whether) it is reached, and each toxic species' peak.\nClosing a tab discards that scenario's stored result. 'Clear All' discards everything."
+                      "icon": "5.",
+                      "title": "Review Results and Export",
+                      "content": "Each completed scenario has flammable-gas and toxic-gas plots. Use the plot controls to inspect the available gas species and thresholds. A RESULTS OUT OF DATE watermark appears when scenario inputs or a referenced battery, user-defined composition or measured flowrate dataset differ from the stored run. Rerun the affected scenario to update its results and remove the watermark. Saved sessions retain this warning; older results without the required library snapshots also need a rerun. The results summary reports peak flammable concentration, the assessment LFL and whether/when it is reached, plus toxic-species peaks against ERPG-3 where available. Use Export PDF Report to select scenarios with stored results and include their inputs, battery specifications, plots and summary tables. Closing a result tab discards that scenario's stored result; Clear All removes all stored results."
             },
             {
-                "icon": "📄",
-                "title": "Exporting Reports",
-                "content": "Click 'Export PDF Report' to generate a document with an intro/assumptions page, a contents page, and per scenario: the exact inputs and battery specification the run used, landscape concentration plots, and summary tables of peaks against LFL and ERPG-3 thresholds.\nOnly scenarios with stored results can be exported, and you choose which to include."
+                      "icon": "6.",
+                      "title": "LIB Calculation Basis and Assumptions",
+                      "content": "The LIB assessment is a simplified, transient, perfectly mixed room model. It calculates free room volume as room height × floor area × (1 − equipment-space percentage/100); gas is assumed to mix uniformly throughout that volume, so local concentrations and spatial stratification are not represented. Off-gas generation follows the selected release method and the entered or imported battery and propagation data. Ventilation is treated as a dilution/extraction rate: the entered L/s/m² is multiplied by room floor area. Emergency ventilation is optional; when enabled, the activation delay starts when room CO first reaches the entered percentage of CO's own LFL. Set Emergency Vent Activation Delay in Room Details to a non-negative number of seconds (default 0). The countdown continues even if CO drops below the trigger. Once the delay expires, the emergency rate applies while CO is at or above the trigger, and standard ventilation applies below it. Activation is evaluated at interval starts on the one-second calculation grid. A zero switch concentration disables this feature.\n                      Flammable concentrations are assessed against the battery LFL unless Use Le Chatelier LFL is selected to estimate a mixture LFL from the composition. The optional temperature-dependent adjustment applies to CO, H2 and total hydrocarbons. Toxic species are compared with their configured ERPG-3 values. The LIB off-gassing calculation uses a fixed 1-second time step; choose a duration that covers the release and assessment period."
             },
             {
-                "icon": "💾",
-                "title": "Saving Sessions",
-                "content": "File > Save (or Save As) stores the whole program state - libraries, the study tree and every scenario's inputs - in a .libsave file. Calculation results are deliberately not saved: they are cheap to recompute, so simply press Run after opening a session."
+                      "icon": "7.",
+                      "title": "Interpretation and Limitations",
+                      "content": "These outputs are estimates based on the supplied inputs, model assumptions, literature values and test data; they are not a substitute for a project-specific fire or hazard assessment. The well-mixed assumption cannot predict local peaks near a battery or poor mixing, and results are sensitive to release rates, composition, propagation, ventilation and selected thresholds. Verify data sources, units and applicability, and have the results reviewed by a suitably qualified person before using them for engineering decisions. A PDF records the model inputs and results; it does not independently validate them."
             },
             {
-                "icon": "🚨",
-                "title": "Emergency Ventilation",
-                "content": "Vent Switch Concentration and Emergency Vent Rate let one scenario use two ventilation rates. Set both to 0 to disable the system.\nVent Switch Concentration is the room's CO concentration, as a percentage of CO's own LFL, at which the ventilation switches to the emergency rate - e.g. 25 switches when CO reaches 25% of its LFL. The switch is not latched: if CO falls back below the trigger the standard rate resumes.\nBoth rates are entered in L/s per m2 of room floor area; the emergency rate is typically higher than the standard rate."
+                      "icon": "8.",
+                      "title": "Other Calculators: Sprinkler Activation",
+                      "content": "The sprinkler activation calculator is a separate feature and is still under construction and validation. It currently estimates activation time from the entered ceiling height, radial distance, sprinkler RTI and activation temperature, ambient temperature and fire-growth category. Treat any output as provisional; verify its method, assumptions and inputs independently before relying on it for design or safety decisions."
             },
             {
-                "icon": "🔄",
-                "title": "Variable Flowrates",
-                "content": "Module level UL9540A test reports often provide flowrate data as graphs. Using WebPlotDigitizer you can extract the curve into a two-column CSV (time in seconds, flowrate in L/s) and import it under Libraries > Flowrate Datasets.\nThen select the 'Module Variable Flowrate' calculation method in a scenario and pick the dataset in its 'Flowrate Dataset' field - the dataset defines both one module's flowrate and its release duration, while the gas composition still comes from the scenario's Composition Method."
+                      "icon": "9.",
+                      "title": "Other Calculators: Pool Spill and Fire",
+                      "content": "The pool spill and pool-fire calculator is still under construction. Its correlations and fuel-property data are provisional, and some fuel properties are placeholders; its outputs are not suitable for design without verified data, units and independent review. Pool-fire duration and related fire outputs depend on the selected options and entered spill, material and environmental parameters. Do not treat these estimates as validated results."
             },
             {
-                "icon": "⚙️",
-                "title": "Technical Notes",
-                "content": "• The battery room is modelled as a single well-mixed volume diluted by the ventilation rate\n• Gas composition comes from literature data per chemistry, or a user-defined composition\n• Flammable results are assessed against the battery LFL, or optionally a Le Chatelier mixture LFL\n• Toxic species are assessed against their ERPG-3 values\n• All correlations are based on 60 peer reviewed papers containing data for a total of 470 LIB experiments"
+                      "icon": "10.",
+                      "title": "Other Calculators: Receptor Heat Flux",
+                      "content": "The receptor heat-flux calculator is also in development. Its results should be considered incomplete and must not be used as a validated design assessment."
             },
-        ]
+                  {
+                      "icon": "11.",
+                      "title": "Saving Sessions",
+                      "content": "Use File > Save or Save As to store libraries, the study tree, scenario inputs and calculated results in a .libsave file. Reopening a session restores saved plots and summaries without rerunning the calculations. Rerun scenarios after changing relevant inputs or library definitions so the stored outputs correspond to the current setup."
+                  },
+              ]
 
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -1797,17 +1933,10 @@ class TutorialPage(QWidget):
 
 # Page for pool spill and fire duration calculations.
 class PoolSpillPage(QWidget):
-    """Placeholder window for the Pool Spill & Fire Duration calculator."""
+    """Provisional spill and pool-fire calculator."""
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
-
-        label = QLabel("Pool Spill & Fire Duration Calculator\n\nThis feature is not yet implemented.")
-        font = label.font()
-        font.setPointSize(18)
-        font.setBold(True)
-        label.setFont(font)
-        label.setAlignment(Qt.AlignCenter)
 
         # dock area for tools, settings, and other widgets
         toolbar = QToolBar("LIB Offgassing Calculation Tool")
@@ -1822,7 +1951,7 @@ class PoolSpillPage(QWidget):
         
         
         self.oi_tickbox = QCheckBox('Operator Intervention')
-        self.oi_tickbox.setToolTip("Check this box to input the operator intervention time for the pool spill calculation. If unchecked, the volumetric flowrate will be used instead.")
+        self.oi_tickbox.setToolTip("Apply the evaporation-based intervention correlation to the calculated pool area.")
         toolbarlayout.addWidget(self.oi_tickbox)
         
         self.pool_fire_tickbox = QCheckBox('Pool Fire Duration')
@@ -1831,21 +1960,26 @@ class PoolSpillPage(QWidget):
         
         calculate_button = QPushButton("Calculate")
         calculate_button.setToolTip("Click here to calculate the pool spill size and pool fire duration based on the input parameters.")
-        # calculate_button.clicked.connect(lambda: data_submission(self.base_window, oi_tickbox.isChecked(), pool_fire_tickbox.isChecked()))
+        calculate_button.clicked.connect(self.run_pool_calculation)
         toolbarlayout.addWidget(calculate_button)
         
         export_to_pdf = QPushButton("Export PDF Report")
-        export_to_pdf.setToolTip("Click here to export a PDF report of the pool spill and pool fire duration results.")
-        # export_to_pdf.clicked.connect(lambda: pdf_results(pool_spill_results=self.base_window.pool_spill_results, pool_fire_results=self.base_window.pool_fire_results, title="Pool Spill & Fire Duration Results"))
+        export_to_pdf.setToolTip("PDF export is not yet available for this calculator.")
+        export_to_pdf.setEnabled(False)
         toolbarlayout.addWidget(export_to_pdf)
         
-        body_layout = QVBoxLayout(self)
-        body_layout.addWidget(toolbar)
+        page_layout = QVBoxLayout(self)
+        page_layout.addWidget(toolbar)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        body_layout = QVBoxLayout(content)
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll)
         
-        main_layout = QHBoxLayout()
-        main_layout.addStretch()
+        main_layout = QVBoxLayout()
         
-        pool_source_label = QLabel("Pool size is determined based on the methodology provided in DETERMINATION OF FLAMMABLE LIQUID POOL SIZES AND THE RESULTANT HAZARDOUS DISTANCES - Paper No. PCIC energy EUR25_03\nby Doug Brooks, Allan Bozek, and Angelo Barberio")
+        pool_source_label = QLabel("Pool size follows the supplied spill correlations (Brooks, Bozek and Barberio, PCIC EUR25_03). Fuel properties are placeholders; results are provisional and not suitable for design without verified data and units.")
         fire_source_label = QLabel("Pool fire duration is determined based on the methodology provided in the two pool fire correlations using SFPE info\nMethod of Heskestad and Method of Thomas")
         pool_source_label.setWordWrap(True)
         fire_source_label.setWordWrap(True)
@@ -1885,7 +2019,7 @@ class PoolSpillPage(QWidget):
         self.wind_speed.setToolTip("Enter the surface wind speed in meters per second.")
         
         self.bund_size = QLineEdit()
-        self.bund_size.setToolTip("Enter the bund size in meters.")
+        self.bund_size.setToolTip("Enter the maximum bunded pool area in square meters.")
         
         self.operator_intervention_time = QLineEdit()
         self.operator_intervention_time.setToolTip("Enter the operator intervention time in seconds.")
@@ -1898,12 +2032,21 @@ class PoolSpillPage(QWidget):
         
         self.volumetric_flowrate = QLineEdit()
         self.volumetric_flowrate.setToolTip("Enter the volumetric flowrate in cubic meters per second.")
+
+        self.kinematic_viscosity = QLineEdit()
+        self.kinematic_viscosity.setToolTip("Enter the fuel's kinematic viscosity in square meters per second.")
+
+        self.pool_depth = QLineEdit()
+        self.pool_depth.setToolTip("Required when Pool Fire Duration is checked; assumed pool depth in meters.")
+
+        self.average_evaporation_rate = QLineEdit()
+        self.average_evaporation_rate.setToolTip("Enter the average volumetric evaporation rate in cubic meters per second.")
         
         
                 # Input group
         input_group = QGroupBox("Pool Spill Inputs")
         
-        input_group.setMaximumWidth(500)
+        input_group.setMaximumWidth(760)
 
         form_layout = QFormLayout()
         form_layout.setHorizontalSpacing(15)
@@ -1919,35 +2062,38 @@ class PoolSpillPage(QWidget):
         form_layout.addRow("Orifice Condition:", self.orifice_condition)
         form_layout2.addRow("Ambient Temperature (K):",self.ambient_temperature)
         form_layout2.addRow("Wind Speed (m/s):",self.wind_speed)
-        form_layout2.addRow("Bund Size (m):",self.bund_size)
+        form_layout2.addRow("Bund Area (m²):",self.bund_size)
         form_layout2.addRow("Volumetric Flowrate (m³/s):",self.volumetric_flowrate)
+        form_layout2.addRow("Orifice Diameter (m):", self.orifice_diameter)
+        form_layout2.addRow("Pressure Differential (Pa):", self.delta_p)
+        form_layout2.addRow("Kinematic Viscosity (m²/s):", self.kinematic_viscosity)
+        form_layout2.addRow("Pool Depth for Fire (m):", self.pool_depth)
 
         
         input_group.setLayout(form_layout)
         input_group2 = QGroupBox("Pool Spill Inputs")
-        input_group2.setMaximumWidth(500)
+        input_group2.setMaximumWidth(760)
         input_group2.setLayout(form_layout2)
         main_layout.addWidget(input_group2)
 
         main_layout.addWidget(input_group)
 
-        # Right spacer
-        main_layout.addStretch()
-
         body_layout.addLayout(main_layout)
 
         self.optional_group = QGroupBox("Operator Intervention Inputs")
-        self.optional_group.setMaximumWidth(500)
+        self.optional_group.setMaximumWidth(760)
         self.optional_group.setVisible(False)
         self.optional_layout = QFormLayout(self.optional_group)
         self.optional_layout.setHorizontalSpacing(15)
         self.optional_layout.setVerticalSpacing(10)
 
-        self.optional_layout.addRow("Orifice Diameter (m):", self.orifice_diameter)
-        self.optional_layout.addRow("Pressure Differential (Pa):", self.delta_p)
         self.optional_layout.addRow("Operator Intervention Time (s):", self.operator_intervention_time)
+        self.optional_layout.addRow("Average Evaporation Rate (m³/s):", self.average_evaporation_rate)
 
         main_layout.addWidget(self.optional_group)
+        self.results_label = QLabel("Enter the inputs and click Calculate. Results use unverified fuel-property data.")
+        self.results_label.setWordWrap(True)
+        body_layout.addWidget(self.results_label)
         body_layout.addWidget(warning_label)
 
         self.oi_tickbox.toggled.connect(self.toggle_optional_inputs)
@@ -1955,6 +2101,80 @@ class PoolSpillPage(QWidget):
 
     def toggle_optional_inputs(self):
         self.optional_group.setVisible(self.oi_tickbox.isChecked())
+
+    def session_snapshot(self):
+        return {"results_text": self.results_label.text()}
+
+    def restore_session(self, state):
+        self.toggle_optional_inputs()
+        self.results_label.setText(state.get(
+            "results_text",
+            "Enter the inputs and click Calculate. Results use unverified fuel-property data.",
+        ))
+
+    def _pool_number(self, widget, label, allow_zero=False):
+        text = widget.text().strip()
+        if not text:
+            raise ValueError(f"{label} is required.")
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be a valid number.") from exc
+        if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+            limit = "0 or greater" if allow_zero else "greater than 0"
+            raise ValueError(f"{label} must be finite and {limit}.")
+        return value
+
+    def run_pool_calculation(self):
+        try:
+            result = calculate_pool_assessment(
+                bund_area=self._pool_number(self.bund_size, "Bund area"),
+                fuel=self.fuel_material.currentText(),
+                wind_speed=self._pool_number(self.wind_speed, "Wind speed"),
+                orifice_diameter=self._pool_number(self.orifice_diameter, "Orifice diameter"),
+                delta_p=self._pool_number(self.delta_p, "Pressure differential"),
+                ambient_temperature=self._pool_number(self.ambient_temperature, "Ambient temperature"),
+                volumetric_flow_rate=self._pool_number(self.volumetric_flowrate, "Volumetric flow rate"),
+                surface=self.surface_material.currentText(),
+                weather=self.surface_weather.currentText(),
+                orifice_condition=self.orifice_condition.currentText(),
+                kinematic_viscosity=self._pool_number(self.kinematic_viscosity, "Kinematic viscosity"),
+                pool_depth=(self._pool_number(self.pool_depth, "Pool depth")
+                            if self.pool_fire_tickbox.isChecked() else None),
+                ground_description=self.ground_conditions.currentText(),
+                intervention_time=(
+                    self._pool_number(self.operator_intervention_time, "Operator intervention time", allow_zero=True)
+                    if self.oi_tickbox.isChecked() else None
+                ),
+                evaporation_rate=(
+                    self._pool_number(self.average_evaporation_rate, "Average evaporation rate")
+                    if self.oi_tickbox.isChecked() else None
+                ),
+                include_fire=self.pool_fire_tickbox.isChecked(),
+            )
+        except (ValueError, KeyError, OverflowError, ZeroDivisionError) as exc:
+            self.results_label.setText("Calculation not available for these inputs.")
+            QMessageBox.warning(self, "Pool Calculation Error", str(exc))
+            return
+
+        lines = [
+            "PROVISIONAL - fuel properties and units must be verified before use.",
+            f"Evaporation-limited area: {result['area_max_m2']:.4g} m²",
+            f"Permeability area: {result['area_permeability_m2']:.4g} m²",
+            f"Combined spill area: {result['area_combined_m2']:.4g} m²",
+        ]
+        if self.oi_tickbox.isChecked():
+            lines.append(f"Intervention-adjusted area: {result['pool_area_m2']:.4g} m²")
+        if self.pool_fire_tickbox.isChecked():
+            lines.extend((
+                f"Pool diameter: {result['pool_diameter_m']:.4g} m",
+                f"Pool volume: {result['pool_volume_m3']:.4g} m³",
+                f"Heat release rate (table-derived, units unverified): {result['heat_release_rate']:.4g}",
+                f"Burn duration: {result['burn_duration_s']:.4g} s",
+                f"Flame height (Heskestad): {result['flame_height_heskestad_m']:.4g} m",
+                f"Flame height (Thomas): {result['flame_height_thomas_m']:.4g} m",
+            ))
+        self.results_label.setText("\n".join(lines))
 
 
 # Placeholder page for receptor heat flux calculations.
