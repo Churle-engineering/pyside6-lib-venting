@@ -2,12 +2,12 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDia
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTabWidget, QToolBar,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox, QGridLayout,
-    QAbstractItemView, QMenu, QTableWidget, QTableWidgetItem)
-from PySide6.QtCore import Qt, QSettings
+    QAbstractItemView, QMenu, QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox)
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import (QFont, QDoubleValidator, QKeySequence, QShortcut,
-    QActionGroup, QColor, QIcon, QPainter, QPixmap)
+    QActionGroup)
 from information import (FIRE_PROPERTIES, POOL_SPREAD_DATA, LIB_TYPE, CELL_FORMAT, CALCULATION_METHODS, _THEMES,
-                         POOL_PROPERTIES, CHEMICAL_PROPERTIES, COMPOSITION_METHODS,
+                         POOL_PROPERTIES, CHEMICAL_PROPERTIES, COMPOSITION_METHODS, SPRINKLER_PROPERTIES,
                          FlowrateProfile, GasComposition, LIBInputs, LIBSpec,
                          CALC_METHOD_MODULE_VARIABLE_FLOWRATE)
 import copy
@@ -18,9 +18,16 @@ from dataclass_forms import build_tabbed_form, read_form
 from lib_validation import input_problems
 from scenario_model import ScenarioStore
 from sprinkler import activation_time_Calc
+from heat_flux_of_emitter import (heat_flux_of_emitter, temp_of_emitter,
+                                  DEFAULT_INPUTS as DEFAULT_HEAT_FLUX_INPUTS)
 from saveload import save_program_state, load_program_state
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
 calculate_pool_assessment = import_module("spill_poolfire").calculate_pool_assessment
+
+#export
+#pyinstaller --clean --noconfirm --name LIBOffgasTool --onedir --icon ".\jeof_icon.ico" --add-data ".\arup_logo.png;." --hidden-import spill_poolfire ".\main.py"
 
 
 # to do's:
@@ -163,8 +170,9 @@ class BaseWindow(QMainWindow):
         """Confirm exit (any close path) and persist user preferences."""
         reply = QMessageBox.question(
             self, 'Exit', 'Are you sure you want to exit?\nAny unsaved changes will be lost.',
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply != QMessageBox.Yes:
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok)
+        if reply != QMessageBox.StandardButton.Ok:
             event.ignore()
             return
         settings = app_settings()
@@ -223,7 +231,7 @@ class IntroPage(QWidget):
          "Provisional spill pool size and pool fire duration estimates.",
          "PoolSpillPage"),
         ("Receptor Heat Flux",
-         "Radiant heat flux received at a distance from a fire. (In development)",
+         "Radiant heat flux received from a rectangular emitting panel (view factor method).",
          "ReceptorHeatFluxPage"),
     ]
 
@@ -233,36 +241,43 @@ class IntroPage(QWidget):
 
         title = QLabel("LIB Off-gassing Calculation Tool")
         title_font = title.font()
-        title_font.setPointSize(26)
+        title_font.setPointSize(30)
         title_font.setBold(True)
         title.setFont(title_font)
         title.setAlignment(Qt.AlignCenter)
+        title.setWordWrap(True)
 
         subtitle = QLabel("Choose a calculator below to get started.")
         subtitle.setObjectName("introSubtitle")
         subtitle_font = subtitle.font()
-        subtitle_font.setPointSize(13)
+        subtitle_font.setPointSize(16)
         subtitle.setFont(subtitle_font)
         subtitle.setAlignment(Qt.AlignCenter)
 
         # 2 x 2 grid of card-style tool buttons
         btn_grid = QGridLayout()
-        btn_grid.setSpacing(16)
-        for index, (name, description, page_name) in enumerate(self.TOOLS):
-            btn_grid.addWidget(self._tool_button(name, description, page_name),
-                               index // 2, index % 2)
+        btn_grid.setSpacing(18)
+        self._tool_grid = btn_grid
+        self._tool_buttons = [
+            self._tool_button(name, description, page_name)
+            for name, description, page_name in self.TOOLS
+        ]
 
         # Tutorial is a secondary action - full width but visually lighter
         tutorial_button = QPushButton("Tutorial - learn the modelling workflow")
         tutorial_button.setObjectName("tutorialButton")
-        tutorial_button.setMinimumHeight(44)
+        tutorial_button.setMinimumHeight(50)
+        tutorial_font = tutorial_button.font()
+        tutorial_font.setPointSize(14)
+        tutorial_button.setFont(tutorial_font)
         tutorial_button.setToolTip("Step-by-step guide to libraries, scenarios, "
                                    "running calculations and exporting reports.")
         tutorial_button.clicked.connect(lambda: self.base_window.show_page("TutorialPage"))
 
-        layout = QVBoxLayout(self)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setSpacing(18)
-        layout.setContentsMargins(50, 36, 50, 36)
+        layout.setContentsMargins(40, 32, 40, 32)
         layout.addStretch(1)
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -271,22 +286,47 @@ class IntroPage(QWidget):
         layout.addWidget(tutorial_button)
         layout.addStretch(2)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(content)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(scroll)
+        self._layout_tool_buttons()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_tool_buttons()
+
+    def _layout_tool_buttons(self):
+        columns = 2 if self.width() >= 700 else 1
+        if getattr(self, "_tool_columns", None) == columns:
+            return
+        self._tool_columns = columns
+        while self._tool_grid.count():
+            self._tool_grid.takeAt(0)
+        self._tool_grid.setColumnStretch(0, 1)
+        self._tool_grid.setColumnStretch(1, 1 if columns == 2 else 0)
+        for index, button in enumerate(self._tool_buttons):
+            self._tool_grid.addWidget(button, index // columns, index % columns)
+
     def _tool_button(self, name, description, page_name):
         """Card-style button: bold tool name over a smaller description line."""
         button = QPushButton()
-        button.setMinimumSize(300, 110)
+        button.setMinimumSize(0, 128)
         button.setToolTip(f"Open the {name}.")
         button.clicked.connect(lambda: self.base_window.show_page(page_name))
 
         name_label = QLabel(name)
         name_font = name_label.font()
-        name_font.setPointSize(14)
+        name_font.setPointSize(17)
         name_font.setBold(True)
         name_label.setFont(name_font)
 
         desc_label = QLabel(description)
         desc_font = desc_label.font()
-        desc_font.setPointSize(10)
+        desc_font.setPointSize(12)
         desc_label.setFont(desc_font)
         desc_label.setWordWrap(True)
 
@@ -296,8 +336,8 @@ class IntroPage(QWidget):
             label.setStyleSheet("background: transparent; border: none;")
 
         button_layout = QVBoxLayout(button)
-        button_layout.setContentsMargins(18, 12, 18, 12)
-        button_layout.setSpacing(6)
+        button_layout.setContentsMargins(20, 14, 20, 14)
+        button_layout.setSpacing(8)
         button_layout.addStretch()
         button_layout.addWidget(name_label)
         button_layout.addWidget(desc_label)
@@ -553,12 +593,16 @@ class ScenarioInputDialog(QDialog):
         widgets = self._field_widgets
         user_defined = widgets["composition_method"].currentText() == "User Defined"
         widgets["gas_composition"].setEnabled(user_defined)
+        widgets["gas_composition"].parentWidget().layout().setRowVisible(
+            widgets["gas_composition"], user_defined)
         if not user_defined:
             widgets["gas_composition"].setToolTip(
                 "Only used when the Composition Method is 'User Defined'.")
 
         variable = widgets["calc_method"].currentText() == CALC_METHOD_MODULE_VARIABLE_FLOWRATE
         widgets["flowrate_profile"].setEnabled(variable)
+        widgets["flowrate_profile"].parentWidget().layout().setRowVisible(
+            widgets["flowrate_profile"], variable)
         if not variable:
             widgets["flowrate_profile"].setToolTip(
                 "Only used by the 'Module Variable Flowrate' calculation method.")
@@ -806,7 +850,6 @@ class LIBPage(QWidget):
         self.base_window = base_window
         self.scenarios = ScenarioStore()   # owns every Scenario; tree items hold only node ids
         self._copied_scenario = None
-        self._status_icons = {}            # has_result -> cached tree dot icon
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -1009,10 +1052,10 @@ class LIBPage(QWidget):
             parent_item.setData(0, NODE_TYPE_ROLE, NODE_GROUP)
             self.scenario_tree_inner.addTopLevelItem(parent_item)
             for scenario in scenarios:
-                item = QTreeWidgetItem([scenario.name])
+                status = "R" if scenario.summary is not None else " "
+                item = QTreeWidgetItem([f"[{status}] {scenario.name}"])
                 item.setData(0, NODE_TYPE_ROLE, NODE_SCENARIO)
                 item.setData(0, NODE_ID_ROLE, scenario.node_id)
-                item.setIcon(0, self._status_icon(scenario.summary is not None))
                 parent_item.addChild(item)
             parent_item.setExpanded(True)
             if select_group is not None and group_name == select_group:
@@ -1023,35 +1066,16 @@ class LIBPage(QWidget):
                     if child.data(0, NODE_ID_ROLE) == select_node_id:
                         self.scenario_tree_inner.setCurrentItem(child)
 
-    def _status_icon(self, has_result):
-        """Small dot icon: filled green when the scenario has a stored result."""
-        icon = self._status_icons.get(has_result)
-        if icon is None:
-            pixmap = QPixmap(12, 12)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            if has_result:
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor("#2e9e5b"))
-            else:
-                painter.setPen(QColor("#9aa0a6"))
-                painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(2, 2, 8, 8)
-            painter.end()
-            icon = QIcon(pixmap)
-            self._status_icons[has_result] = icon
-        return icon
-
-    def _refresh_tree_icons(self):
-        """Update every scenario item's result dot without rebuilding the tree."""
+    def _refresh_tree_status(self):
+        """Update each scenario label with whether a result is stored."""
         for group_index in range(self.scenario_tree_inner.topLevelItemCount()):
             group_item = self.scenario_tree_inner.topLevelItem(group_index)
             for child_index in range(group_item.childCount()):
                 child = group_item.child(child_index)
                 scenario = self.scenarios.get(child.data(0, NODE_ID_ROLE))
-                child.setIcon(0, self._status_icon(
-                    scenario is not None and scenario.summary is not None))
+                if scenario is not None:
+                    status = "R" if scenario.summary is not None else " "
+                    child.setText(0, f"[{status}] {scenario.name}")
 
     def _show_tree_context_menu(self, pos):
         item = self.scenario_tree_inner.itemAt(pos)
@@ -1388,7 +1412,7 @@ class LIBPage(QWidget):
         self.scenarios.clear_results()
         self._clear_summary_stack()
         self._clear_result_tabs()
-        self._refresh_tree_icons()
+        self._refresh_tree_status()
 
     def _clear_summary_stack(self):
         while self.summary_stack.count() > 1:
@@ -1495,7 +1519,7 @@ class LIBPage(QWidget):
             if scenario is None or scenario.result is None:
                 self._remove_result_tab(node_id)
         self._refresh_result_watermarks()
-        self._refresh_tree_icons()
+        self._refresh_tree_status()
 
     def _refresh_result_watermarks(self):
         from venting_calculation import set_result_plots_out_of_date
@@ -1551,7 +1575,7 @@ class LIBPage(QWidget):
             scenario.summary = None
         self._remove_result_tab(node_id)
         self._show_result_summary("Calculation Results")
-        self._refresh_tree_icons()
+        self._refresh_tree_status()
 
 
     def export_current_sheet_pdf(self):
@@ -1582,15 +1606,23 @@ class LIBPage(QWidget):
 # Page for calculating sprinkler activation times from the supplied inputs.
 class SprinklerPage(QWidget):
     """UI page for sprinkler activation time calculations."""
+    PLACEHOLDER_TEXT = "Run a calculation to see the activation time here."
+    CUSTOM_PRESET = "Custom"
+    HISTORY_HEADERS = ["#", "Sprinkler ID", "Activation Time (s)", "Fire Growth",
+                       "Ceiling Height (m)", "Radial Distance (m)", "RTI (m·s)^0.5",
+                       "Activation Temp (°C)", "Ambient Temp (°C)", "HRR at Activation (kW)"]
+
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
         self.last_activation_time_s = None
+        self.result_history = []
 
         page_layout = QVBoxLayout(self)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(0)
 
+        # --- Toolbar ---
         toolbar = QToolBar("Sprinkler Activation Time Calculator")
         toolbar.setMovable(False)
         toolbarcontents = QWidget()
@@ -1602,102 +1634,201 @@ class SprinklerPage(QWidget):
         toolbar.addWidget(toolbarcontents)
 
         run_button = QPushButton("Run")
-        run_button.setToolTip("Run sprinkler activation time calculation with the current inputs.")
+        run_button.setObjectName("runButton")
+        run_button.setShortcut(QKeySequence("Ctrl+Return"))
+        run_button.setToolTip("Run the sprinkler activation time calculation (Ctrl+Enter).\n"
+                              "Pressing Enter in any input field also runs it.")
         run_button.clicked.connect(self.run_sprinkler_calc)
 
-        clear_button = QPushButton("Clear")
-        clear_button.setToolTip("Clear all sprinkler input fields.")
-        clear_button.clicked.connect(self.clear_inputs)
-
-        self.copy_activation_button = QPushButton("Copy Activation Duration")
-        self.copy_activation_button.setToolTip("Copy the computed sprinkler activation duration to the clipboard.")
+        self.copy_activation_button = QPushButton("Copy Latest Result")
+        self.copy_activation_button.setToolTip("Copy the latest activation time to the clipboard.")
         self.copy_activation_button.setEnabled(False)
         self.copy_activation_button.clicked.connect(self.copy_activation_duration)
 
+        clear_inputs_button = QPushButton("Clear Inputs")
+        clear_inputs_button.setToolTip("Clear all input fields. The results history is kept.")
+        clear_inputs_button.clicked.connect(self.clear_inputs)
+
+        clear_results_button = QPushButton("Clear Results")
+        clear_results_button.setObjectName("clearAllButton")
+        clear_results_button.setToolTip("Clear the latest result and the results history.")
+        clear_results_button.clicked.connect(self.clear_results)
+
         toolbarlayout.addWidget(run_button)
-        toolbarlayout.addWidget(clear_button)
         toolbarlayout.addWidget(self.copy_activation_button)
         toolbarlayout.addWidget(_make_toolbar_separator())
-
+        toolbarlayout.addWidget(clear_inputs_button)
+        toolbarlayout.addWidget(clear_results_button)
         page_layout.addWidget(toolbar)
 
-        center_layout = QHBoxLayout()
-        center_layout.setContentsMargins(24, 20, 24, 24)
-        center_layout.addStretch()
+        # --- Body: inputs (left) | latest result + history (right) ---
+        body_layout = QHBoxLayout()
+        body_layout.setContentsMargins(20, 16, 20, 20)
+        body_layout.setSpacing(20)
+        page_layout.addLayout(body_layout, 1)
 
-        panel = QWidget()
-        panel.setMaximumWidth(760)
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setSpacing(14)
+        input_panel = QWidget()
+        input_panel.setMinimumWidth(360)
+        input_panel.setMaximumWidth(460)
+        input_column = QVBoxLayout(input_panel)
+        input_column.setContentsMargins(0, 0, 0, 0)
+        input_column.setSpacing(12)
 
-        title = QLabel("Sprinkler Activation Time Calculator")
+        title = QLabel("Sprinkler Activation Time")
         title_font = title.font()
-        title_font.setPointSize(20)
+        title_font.setPointSize(18)
         title_font.setBold(True)
         title.setFont(title_font)
-        title.setAlignment(Qt.AlignCenter)
 
-        subtitle = QLabel(
-            "Enter the sprinkler and fire parameters below, then click Run to compute activation time."
-        )
+        subtitle = QLabel("t²-fire ceiling jet with an RTI detector response model "
+                          "(SFPE Handbook, p. 1324).")
         subtitle.setWordWrap(True)
-        subtitle.setAlignment(Qt.AlignCenter)
 
-        input_group = QGroupBox("Inputs")
-        form_layout = QFormLayout()
-        form_layout.setHorizontalSpacing(16)
-        form_layout.setVerticalSpacing(10)
-
+        # Sprinkler
         self.sprinkler_id = QLineEdit()
-        self.sprinkler_id.setPlaceholderText("e.g. SPK-01")
-        self.sprinkler_id.setToolTip("Optional sprinkler identifier.")
-
-        self.ceiling_height = QLineEdit()
-        self.ceiling_height.setPlaceholderText("e.g. 3.0")
-        self.ceiling_height.setToolTip("Ceiling height in meters.")
-
-        self.radial_distance = QLineEdit()
-        self.radial_distance.setPlaceholderText("e.g. 2.0")
-        self.radial_distance.setToolTip("Radial distance from fire plume centerline to sprinkler in meters.")
+        self.sprinkler_id.setPlaceholderText("e.g. SPK-01 (optional)")
+        self.sprinkler_id.setToolTip("Optional sprinkler identifier shown in the results history.")
 
         self.sprinkler_rti = QLineEdit()
         self.sprinkler_rti.setPlaceholderText("e.g. 80")
-        self.sprinkler_rti.setToolTip("Sprinkler response time index (m*s)^0.5.")
+        self.sprinkler_rti.setToolTip("Sprinkler response time index (m·s)^0.5.")
+        self.rti_preset = self._preset_combo(
+            SPRINKLER_PROPERTIES["sprinkler response time index"], self.sprinkler_rti, "")
+        self.rti_preset.setToolTip("Fill the RTI from a typical sprinkler type (AS 2118.1:2017).")
 
         self.activation_temperature = QLineEdit()
         self.activation_temperature.setPlaceholderText("e.g. 68")
-        self.activation_temperature.setToolTip("Sprinkler activation temperature in degC.\n Typical inputs are 'red': 68, 'yellow': 79, 'green': 93")
+        self.activation_temperature.setToolTip("Sprinkler activation temperature (°C).")
+        self.activation_preset = self._preset_combo(
+            SPRINKLER_PROPERTIES["activation temperatures"], self.activation_temperature, " °C")
+        self.activation_preset.setToolTip("Fill the activation temperature from a bulb colour.")
+
+        sprinkler_group, sprinkler_form = self._input_group("Sprinkler")
+        sprinkler_form.addRow("Sprinkler ID:", self.sprinkler_id)
+        sprinkler_form.addRow("RTI ((m·s)^0.5):", self._with_preset(self.sprinkler_rti, self.rti_preset))
+        sprinkler_form.addRow("Activation Temp (°C):",
+                              self._with_preset(self.activation_temperature, self.activation_preset))
+
+        # Geometry
+        self.ceiling_height = QLineEdit()
+        self.ceiling_height.setPlaceholderText("e.g. 3.0")
+        self.ceiling_height.setToolTip("Height of the ceiling above the fire source (m).")
+
+        self.radial_distance = QLineEdit()
+        self.radial_distance.setPlaceholderText("e.g. 2.0")
+        self.radial_distance.setToolTip("Horizontal distance from the fire plume centreline to the sprinkler (m).")
+
+        geometry_group, geometry_form = self._input_group("Geometry")
+        geometry_form.addRow("Ceiling Height (m):", self.ceiling_height)
+        geometry_form.addRow("Radial Distance (m):", self.radial_distance)
+
+        # Fire & environment
+        self.fire_growth_rate = QComboBox()
+        for name, alpha in FIRE_PROPERTIES["fire growth rate"].items():
+            self.fire_growth_rate.addItem(name)
+            self.fire_growth_rate.setItemData(
+                self.fire_growth_rate.count() - 1, f"α = {alpha} kW/s²", Qt.ToolTipRole)
+        self.fire_growth_rate.setToolTip("t² fire growth rate category.")
 
         self.ambient_temperature = QLineEdit()
         self.ambient_temperature.setPlaceholderText("e.g. 20")
-        self.ambient_temperature.setToolTip("Ambient temperature in degC.")
+        self.ambient_temperature.setToolTip("Ambient room temperature (°C).")
 
-        self.fire_growth_rate = QComboBox()
-        self.fire_growth_rate.addItems(list(FIRE_PROPERTIES["fire growth rate"].keys()))
-        self.fire_growth_rate.setToolTip("Select the fire growth rate category.")
+        fire_group, fire_form = self._input_group("Fire && Environment")
+        fire_form.addRow("Fire Growth Rate:", self.fire_growth_rate)
+        fire_form.addRow("Ambient Temp (°C):", self.ambient_temperature)
 
-        form_layout.addRow("Sprinkler ID:", self.sprinkler_id)
-        form_layout.addRow("Ceiling Height (m):", self.ceiling_height)
-        form_layout.addRow("Radial Distance (m):", self.radial_distance)
-        form_layout.addRow("Response Time Index (m*s)^0.5:", self.sprinkler_rti)
-        form_layout.addRow("Activation Temperature (degC):", self.activation_temperature)
-        form_layout.addRow("Ambient Temperature (degC):", self.ambient_temperature)
-        form_layout.addRow("Fire Growth Rate:", self.fire_growth_rate)
-        input_group.setLayout(form_layout)
+        for edit in (self.sprinkler_id, self.sprinkler_rti, self.activation_temperature,
+                     self.ceiling_height, self.radial_distance, self.ambient_temperature):
+            edit.returnPressed.connect(self.run_sprinkler_calc)
 
-        self.results_label = QLabel("Results will appear here after running the calculation.")
+        input_column.addWidget(title)
+        input_column.addWidget(subtitle)
+        input_column.addWidget(sprinkler_group)
+        input_column.addWidget(geometry_group)
+        input_column.addWidget(fire_group)
+        input_column.addStretch()
+
+        # Latest result card
+        result_column = QVBoxLayout()
+        result_column.setSpacing(12)
+
+        latest_group = QGroupBox("Latest Result")
+        latest_layout = QVBoxLayout(latest_group)
+        latest_layout.setSpacing(4)
+        self.latest_value_label = QLabel("—")
+        value_font = self.latest_value_label.font()
+        value_font.setPointSize(28)
+        value_font.setBold(True)
+        self.latest_value_label.setFont(value_font)
+        self.latest_value_label.setAlignment(Qt.AlignCenter)
+        self.latest_value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self.results_label = QLabel(self.PLACEHOLDER_TEXT)
         self.results_label.setWordWrap(True)
         self.results_label.setAlignment(Qt.AlignCenter)
+        self.results_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        panel_layout.addWidget(title)
-        panel_layout.addWidget(subtitle)
-        panel_layout.addWidget(input_group)
-        panel_layout.addWidget(self.results_label)
+        latest_layout.addWidget(self.latest_value_label)
+        latest_layout.addWidget(self.results_label)
 
-        center_layout.addWidget(panel)
-        center_layout.addStretch()
+        # History table
+        history_group = QGroupBox("Results History")
+        history_layout = QVBoxLayout(history_group)
+        history_hint = QLabel("Every run is kept until Clear Results is pressed. "
+                              "The newest result is listed first.")
+        history_hint.setWordWrap(True)
 
-        page_layout.addLayout(center_layout)
+        self.history_table = QTableWidget(0, len(self.HISTORY_HEADERS))
+        self.history_table.setHorizontalHeaderLabels(self.HISTORY_HEADERS)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+
+        history_layout.addWidget(history_hint)
+        history_layout.addWidget(self.history_table)
+
+        result_column.addWidget(latest_group)
+        result_column.addWidget(history_group, 1)
+
+        body_layout.addWidget(input_panel)
+        body_layout.addLayout(result_column, 1)
+
+    @staticmethod
+    def _input_group(title):
+        group = QGroupBox(title)
+        form = QFormLayout(group)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        return group, form
+
+    @staticmethod
+    def _with_preset(edit, combo):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(edit, 1)
+        layout.addWidget(combo)
+        return row
+
+    def _preset_combo(self, presets, target, units):
+        """Combo that fills `target` with a typical value; typing reverts it to Custom."""
+        combo = QComboBox()
+        combo.addItem(self.CUSTOM_PRESET, None)
+        for name, value in presets.items():
+            combo.addItem(f"{name.title()} ({value}{units})", value)
+        def apply_preset(_index):
+            if combo.currentData() is not None:
+                target.setText(f"{combo.currentData():g}")
+
+        combo.activated.connect(apply_preset)
+        target.textEdited.connect(lambda _text: combo.setCurrentIndex(0))
+        return combo
 
     def _get_sprinkler_inputs(self):
         """Collect and validate user input for sprinkler calculations."""
@@ -1738,8 +1869,8 @@ class SprinklerPage(QWidget):
     def run_sprinkler_calc(self):
         """Run sprinkler activation time calculation from current UI inputs."""
         try:
-            sprinkler_data = self._get_sprinkler_inputs()
-            result = activation_time_Calc(sprinkler_data)
+            data = self._get_sprinkler_inputs()
+            result = activation_time_Calc(data)
         except ValueError as err:
             QMessageBox.warning(self, "Input Error", str(err))
             return
@@ -1748,64 +1879,123 @@ class SprinklerPage(QWidget):
             return
 
         activation_time = result.get("activation_time_s")
-        if activation_time is None:
-            self.last_activation_time_s = None
-            self.copy_activation_button.setEnabled(False)
-            self.results_label.setText(
-                "No activation occurred within the maximum simulation time (10000 s)."
-            )
-            QMessageBox.information(
-                self,
-                "Sprinkler Result",
-                "No activation occurred within the maximum simulation time (10000 s).",
-            )
-            return
+        activated = activation_time is not None
+        self.result_history.append({
+            "sprinkler_id": data["sprinkler_id"],
+            "fire_growth_rate": data["fire_growth_rate"],
+            "ceiling_height": data["ceiling_height"],
+            "radial_distance": data["radial_distance"],
+            "rti": data["sprinkler_response_time_index"],
+            "activation_temperature": data["sprinkler_activation_temperature"],
+            "ambient_temperature": data["ambient_temperature"],
+            "activation_time_s": activation_time,
+            "heat_release_rate_kw": result["heat_release_rate_kw"] if activated else None,
+            "detector_temperature_c": result["detector_temperature_c"],
+            "ceiling_jet_temperature_c": result["ceiling_jet_temperature_c"],
+            "jet_velocity_mps": result["jet_velocity_mps"],
+        })
 
-        summary = (
-            f"Sprinkler {sprinkler_data['sprinkler_id']} activation time: {activation_time:.1f} s\n"
-            f"Detector temperature at activation check: {result['detector_temperature_c']:.1f} degC"
-        )
         self.last_activation_time_s = activation_time
-        self.copy_activation_button.setEnabled(True)
-        self.results_label.setText(summary)
-        QMessageBox.information(self, "Sprinkler Result", summary)
+        if activated:
+            self.results_label.setText(
+                f"Sprinkler {data['sprinkler_id']} · {data['fire_growth_rate']} fire\n"
+                f"Detector temperature: {result['detector_temperature_c']:.1f} °C   ·   "
+                f"Ceiling jet: {result['ceiling_jet_temperature_c']:.1f} °C at "
+                f"{result['jet_velocity_mps']:.2f} m/s\n"
+                f"Heat release rate at activation: {result['heat_release_rate_kw']:.0f} kW"
+            )
+        else:
+            self.results_label.setText(
+                f"Sprinkler {data['sprinkler_id']} did not activate within the maximum "
+                "simulation time (10000 s)."
+            )
+        self._refresh_result_display()
+
+    @staticmethod
+    def _fmt(value, spec):
+        return "-" if value is None else format(value, spec)
+
+    def _refresh_result_display(self):
+        """Redraw the latest-result value and the history table from stored state."""
+        if self.last_activation_time_s is not None:
+            self.latest_value_label.setText(f"{self.last_activation_time_s:.1f} s")
+        elif self.result_history:
+            self.latest_value_label.setText("No activation")
+        else:
+            self.latest_value_label.setText("—")
+        self.copy_activation_button.setEnabled(self.last_activation_time_s is not None)
+
+        table = self.history_table
+        table.setRowCount(len(self.result_history))
+        # newest first
+        for row, (number, record) in enumerate(reversed(list(enumerate(self.result_history, 1)))):
+            activation = record.get("activation_time_s")
+            values = [
+                str(number),
+                str(record.get("sprinkler_id", "")),
+                "No activation" if activation is None else f"{activation:.1f}",
+                str(record.get("fire_growth_rate", "")),
+                self._fmt(record.get("ceiling_height"), "g"),
+                self._fmt(record.get("radial_distance"), "g"),
+                self._fmt(record.get("rti"), "g"),
+                self._fmt(record.get("activation_temperature"), "g"),
+                self._fmt(record.get("ambient_temperature"), "g"),
+                self._fmt(record.get("heat_release_rate_kw"), ".0f"),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                if row == 0:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                table.setItem(row, column, item)
 
     def copy_activation_duration(self):
         if self.last_activation_time_s is None:
             QMessageBox.warning(
                 self,
-                "No Activation Duration",
-                "Run a successful sprinkler calculation first to copy the activation duration.",
+                "No Activation Time",
+                "The latest calculation has no activation time to copy.",
             )
             return
 
-        activation_duration_text = f"{self.last_activation_time_s:.1f} s"
-        QApplication.clipboard().setText(activation_duration_text)
+        QApplication.clipboard().setText(f"{self.last_activation_time_s:.1f} s")
+        self.copy_activation_button.setText("Copied!")
+        QTimer.singleShot(1500, lambda: self.copy_activation_button.setText("Copy Latest Result"))
 
     def session_snapshot(self):
         return {
             "activation_time_s": self.last_activation_time_s,
             "results_text": self.results_label.text(),
+            "history": self.result_history,
         }
 
     def restore_session(self, state):
         self.last_activation_time_s = state.get("activation_time_s")
-        self.copy_activation_button.setEnabled(self.last_activation_time_s is not None)
-        self.results_label.setText(state.get(
-            "results_text", "Results will appear here after running the calculation."
-        ))
+        self.result_history = list(state.get("history", []))
+        self.results_label.setText(state.get("results_text", self.PLACEHOLDER_TEXT))
+        self._refresh_result_display()
 
     def clear_inputs(self):
-        self.sprinkler_id.clear()
-        self.ceiling_height.clear()
-        self.radial_distance.clear()
-        self.sprinkler_rti.clear()
-        self.activation_temperature.clear()
-        self.ambient_temperature.clear()
+        for edit in (self.sprinkler_id, self.ceiling_height, self.radial_distance,
+                     self.sprinkler_rti, self.activation_temperature, self.ambient_temperature):
+            edit.clear()
+        self.rti_preset.setCurrentIndex(0)
+        self.activation_preset.setCurrentIndex(0)
         self.fire_growth_rate.setCurrentIndex(0)
+
+    def clear_results(self):
+        if self.result_history:
+            reply = QMessageBox.question(
+                self, "Clear Results", "Clear the latest result and the results history?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        self.result_history = []
         self.last_activation_time_s = None
-        self.copy_activation_button.setEnabled(False)
-        self.results_label.setText("Results will appear here after running the calculation.")
+        self.results_label.setText(self.PLACEHOLDER_TEXT)
+        self._refresh_result_display()
 
 
 # Tutorial page that explains how to use the modelling workflow.
@@ -1869,17 +2059,88 @@ class TutorialPage(QWidget):
             {
                       "icon": "8.",
                       "title": "Other Calculators: Sprinkler Activation",
-                      "content": "The sprinkler activation calculator is a separate feature and is still under construction and validation. It currently estimates activation time from the entered ceiling height, radial distance, sprinkler RTI and activation temperature, ambient temperature and fire-growth category. Treat any output as provisional; verify its method, assumptions and inputs independently before relying on it for design or safety decisions."
+                      "content": (
+                          "Inputs: enter the ceiling height above the fire, horizontal radial distance from the plume centreline, "
+                          "sprinkler response time index (RTI), activation temperature, ambient temperature and fire-growth category. "
+                          "The RTI and bulb-colour presets fill typical values; check them against the actual sprinkler specification. "
+                          "The sprinkler ID is optional.\n\n"
+                          "Calculation process: the selected growth coefficient defines a t-squared fire, with heat release rate "
+                          "Q = alpha x time squared. At each 0.1-second step, the code uses Alpert-type ceiling-jet correlations "
+                          "to estimate the gas temperature and velocity at the sprinkler from Q, ceiling height and radial distance. "
+                          "The sprinkler element starts at ambient temperature and heats towards the ceiling-jet temperature, "
+                          "with response rate sqrt(jet velocity) / RTI. The thermal response is integrated over each step and "
+                          "the threshold crossing is resolved within the step. Activation is the first time the element reaches "
+                          "its activation temperature, not the time the gas reaches that temperature.\n\n"
+                          "Outputs: press Run to display activation time, element and ceiling-jet temperatures, jet velocity and "
+                          "heat release rate at activation. If the element does not activate within 10000 seconds, the result "
+                          "reports no activation. Each run is retained in Results History; Copy Latest Result copies an available "
+                          "activation time. Clear Inputs keeps the history, while Clear Results removes it.\n\n"
+                          "Basis and limitations: this implementation was produced by Charlie Bibb using the SFPE Handbook "
+                          "heat-detection method (p. 1324), not ArupCompute. It assumes the selected growing fire and a simplified "
+                          "ceiling jet and RTI response; obstructions, sprinkler conduction losses and fire suppression after activation "
+                          "are not modelled. Treat outputs as provisional and verify the method, inputs and applicability independently "
+                          "before relying on them for design or safety decisions."
+                      )
             },
             {
                       "icon": "9.",
                       "title": "Other Calculators: Pool Spill and Fire",
-                      "content": "The pool spill and pool-fire calculator is still under construction. Its correlations and fuel-property data are provisional, and some fuel properties are placeholders; its outputs are not suitable for design without verified data, units and independent review. Pool-fire duration and related fire outputs depend on the selected options and entered spill, material and environmental parameters. Do not treat these estimates as validated results."
+                      "content": (
+                          "Inputs: select the fuel, surface material, surface weather and orifice condition. Enter ambient "
+                          "temperature in kelvin, wind speed, bund area, volumetric flowrate, orifice diameter and pressure differential "
+                          "in the displayed units. The orifice/pressure inputs and entered volumetric flowrate are used by different "
+                          "spill correlations; check that they describe a consistent release.\n\n"
+                          "Spill calculation: the code estimates an evaporation-limited area from the orifice discharge, fuel "
+                          "properties, wind and temperature, and caps this area at the bund area (area_max). It separately estimates "
+                          "an infiltration-limited area from volumetric flowrate, fuel viscosity and surface permeability "
+                          "(area_permeability). The combined estimate is area_max x area_permeability / "
+                          "(area_max + area_permeability), reported as area_combined. These are correlation-based estimates, "
+                          "not a time-dependent simulation of pool spreading.\n\n"
+                          "Operator Intervention: selecting this option requires an intervention time and pool depth. Choose a "
+                          "ground-condition depth preset or Custom to enter a depth in metres. The code derives an evaporation "
+                          "term from the existing fuel, wind and temperature inputs and applies the intervention correlation "
+                          "to area_combined. The adjusted area is reported separately; the three baseline areas remain unchanged.\n\n"
+                          "Pool Fire Calculation: selecting this option also requires pool depth. The fire uses area_combined, "
+                          "or the intervention-adjusted area when intervention is selected. The code assumes a circular pool "
+                          "to calculate diameter, and a uniform depth to calculate volume = area x depth. Heat release rate is "
+                          "estimated from fuel mass burning rate, heat of combustion, pool area and a diameter-dependent correction. "
+                          "Burn duration is volume / (area x liquid regression rate), where regression rate is mass burning rate / "
+                          "liquid density. This represents depletion of the assumed pool inventory at a constant burning rate; "
+                          "it does not model continued fuel supply during the fire. Heskestad and Thomas flame-height estimates "
+                          "are reported separately.\n\n"
+                          "Outputs and limitations: press Calculate to display the spill areas and selected intervention/fire "
+                          "outputs; Copy Latest Result copies that assessment. The correlations (Brooks, Bozek and Barberio, "
+                          "PCIC EUR25_03) and fuel-property data remain provisional, with some placeholder properties. "
+                          "Verify property values, units, pool-depth assumptions and correlation applicability independently; "
+                          "do not treat these outputs as validated design results."
+                      )
             },
             {
                       "icon": "10.",
                       "title": "Other Calculators: Receptor Heat Flux",
-                      "content": "The receptor heat-flux calculator is also in development. Its results should be considered incomplete and must not be used as a validated design assessment."
+                      "content": (
+                          "Inputs: choose Emissive Power to enter the panel's radiant output in kW/m2, or Emitter Temperature "
+                          "to enter surface temperature in kelvin and emissivity (greater than 0 and no more than 1). "
+                          "Enter one or more emitter units, each with a unique name, panel length and panel width in metres. "
+                          "All units share the emitter inputs and receptor distances. The receptor ID is optional.\n\n"
+                          "Calculation process: for each unit and distance, the code calculates a dimensionless rectangular-panel "
+                          "view factor using the implemented geometry from the ArupCompute view-factor documentation. "
+                          "In Emissive Power mode, received heat flux = emissive power x view factor. In Emitter Temperature mode, "
+                          "the panel's emissive power is calculated from emissivity x Stefan-Boltzmann constant x temperature "
+                          "to the fourth power, then multiplied by the same view factor. Temperature must be absolute (kelvin), "
+                          "and the constant is expressed in kW/m2/K4 so received heat flux is reported in kW/m2.\n\n"
+                          "Distances and outputs: choose Single Point for one distance, or Range for start, end and step. "
+                          "A range evaluates successive distances from the start; the end is included only when a step lands "
+                          "on it. Up to 1000 distances are allowed. Press Run to calculate each unit independently and plot "
+                          "its own curve; unit contributions are not summed. Latest Result shows the single result or the "
+                          "largest result across the latest run. Results History records each unit/distance result, its view "
+                          "factor and inputs. Plot height and width are adjustable; Copy Latest Result copies a single heat-flux "
+                          "value or a distance-by-unit table for multiple results. Clear Inputs keeps history; Clear Results removes it.\n\n"
+                          "Limitations: this is a radiation-only calculation for the implemented panel/receptor arrangement. "
+                          "It does not model convection, atmospheric attenuation, shielding or a changing emitter temperature. "
+                          "Verify that the geometry represents the actual arrangement and independently check the method, "
+                          "inputs and units before relying on these provisional outputs for design."
+                      )
             },
                   {
                       "icon": "11.",
@@ -1934,66 +2195,83 @@ class TutorialPage(QWidget):
 # Page for pool spill and fire duration calculations.
 class PoolSpillPage(QWidget):
     """Provisional spill and pool-fire calculator."""
+    PLACEHOLDER_TEXT = "Run a calculation to see the pool spill areas here."
+
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
 
-        # dock area for tools, settings, and other widgets
-        toolbar = QToolBar("LIB Offgassing Calculation Tool")
-        toolbar.setMovable(False)  # optional: prevent the toolbar from being dragged
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        toolbar = QToolBar("Pool Spill and Fire Calculator")
+        toolbar.setMovable(False)
         toolbarcontents = QWidget()
         toolbarcontents.setObjectName("toolbarContents")
-        toolbarlayout = QHBoxLayout()
+        toolbarlayout = QHBoxLayout(toolbarcontents)
         toolbarlayout.setContentsMargins(0, 0, 0, 0)
         toolbarlayout.setSpacing(6)
-        toolbarcontents.setLayout(toolbarlayout)
         toolbar.addWidget(toolbarcontents)
-        
-        
-        self.oi_tickbox = QCheckBox('Operator Intervention')
-        self.oi_tickbox.setToolTip("Apply the evaporation-based intervention correlation to the calculated pool area.")
-        toolbarlayout.addWidget(self.oi_tickbox)
-        
-        self.pool_fire_tickbox = QCheckBox('Pool Fire Duration')
-        self.pool_fire_tickbox.setToolTip("Check this box to calculate the pool fire duration, flame height, and heat release rate")
-        toolbarlayout.addWidget(self.pool_fire_tickbox)
-        
+
         calculate_button = QPushButton("Calculate")
-        calculate_button.setToolTip("Click here to calculate the pool spill size and pool fire duration based on the input parameters.")
+        calculate_button.setObjectName("runButton")
+        calculate_button.setShortcut(QKeySequence("Ctrl+Return"))
+        calculate_button.setToolTip("Calculate the spill and selected fire outputs (Ctrl+Enter).")
         calculate_button.clicked.connect(self.run_pool_calculation)
         toolbarlayout.addWidget(calculate_button)
-        
-        export_to_pdf = QPushButton("Export PDF Report")
-        export_to_pdf.setToolTip("PDF export is not yet available for this calculator.")
-        export_to_pdf.setEnabled(False)
-        toolbarlayout.addWidget(export_to_pdf)
-        
-        page_layout = QVBoxLayout(self)
+
+        self.copy_result_button = QPushButton("Copy Latest Result")
+        self.copy_result_button.setToolTip("Copy the latest pool assessment to the clipboard.")
+        self.copy_result_button.setEnabled(False)
+        self.copy_result_button.clicked.connect(self.copy_latest_result)
+        toolbarlayout.addWidget(self.copy_result_button)
+        toolbarlayout.addWidget(_make_toolbar_separator())
+
+        clear_inputs_button = QPushButton("Clear Inputs")
+        clear_inputs_button.setToolTip("Clear numeric inputs, keeping the latest result.")
+        clear_inputs_button.clicked.connect(self.clear_inputs)
+        toolbarlayout.addWidget(clear_inputs_button)
+
+        clear_results_button = QPushButton("Clear Results")
+        clear_results_button.setObjectName("clearAllButton")
+        clear_results_button.setToolTip("Clear the latest pool assessment.")
+        clear_results_button.clicked.connect(self.clear_results)
+        toolbarlayout.addWidget(clear_results_button)
         page_layout.addWidget(toolbar)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         content = QWidget()
-        body_layout = QVBoxLayout(content)
+        body_layout = QHBoxLayout(content)
+        body_layout.setContentsMargins(20, 16, 20, 20)
+        body_layout.setSpacing(20)
         scroll.setWidget(content)
-        page_layout.addWidget(scroll)
-        
-        main_layout = QVBoxLayout()
-        
-        pool_source_label = QLabel("Pool size follows the supplied spill correlations (Brooks, Bozek and Barberio, PCIC EUR25_03). Fuel properties are placeholders; results are provisional and not suitable for design without verified data and units.")
-        fire_source_label = QLabel("Pool fire duration is determined based on the methodology provided in the two pool fire correlations using SFPE info\nMethod of Heskestad and Method of Thomas")
-        pool_source_label.setWordWrap(True)
-        fire_source_label.setWordWrap(True)
-        body_layout.addWidget(pool_source_label)
-        body_layout.addWidget(fire_source_label)
-        
-        warning_label = QLabel("The above calculations are based on principles developed in the Structural Design for Fire Safety, 2001. Calculations are based on certain assumptions and have inherent limitations. The results of such calculations may or may not have reasonable predictive capabilities for a given situation and should only be interpreted by an informed user. There is no absolute guarantee of the accuracy of these calculations.")
-        warning_label.setStyleSheet("color: red; font-weight: bold;")
-        warning_label.setWordWrap(True)
+        page_layout.addWidget(scroll, 1)
 
-        #drop boxes
+        input_panel = QWidget()
+        input_panel.setMinimumWidth(360)
+        input_panel.setMaximumWidth(460)
+        input_column = QVBoxLayout(input_panel)
+        input_column.setContentsMargins(0, 0, 0, 0)
+        input_column.setSpacing(12)
+
+        title = QLabel("Pool Spill & Fire")
+        title_font = title.font()
+        title_font.setPointSize(18)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        subtitle = QLabel("Spill spread correlations (Brooks, Bozek and Barberio, "
+                          "PCIC EUR25_03), with optional pool-fire assessment.")
+        subtitle.setWordWrap(True)
+        input_column.addWidget(title)
+        input_column.addWidget(subtitle)
+
         self.fuel_material = QComboBox()
         self.fuel_material.setToolTip("Select the fuel material for the pool spill.")
         self.fuel_material.addItems(list(POOL_SPREAD_DATA.keys()))
+        self.fuel_material.setCurrentText("diesel")
         self.surface_weather = QComboBox()
         self.surface_weather.setToolTip("Select the surface weather condition for the pool spill.")
         self.surface_weather.addItems(list(POOL_PROPERTIES["relative_permeability"]))
@@ -2003,8 +2281,10 @@ class PoolSpillPage(QWidget):
         self.surface_material.addItems(list(POOL_PROPERTIES["intrinsic_permeability"]))
         
         self.ground_conditions = QComboBox()
-        self.ground_conditions.setToolTip("Select the ground conditions for the pool spill.")
+        self.ground_conditions.setToolTip("Select a typical pool depth from ground conditions, "
+                          "or Custom to enter a depth in meters.")
         self.ground_conditions.addItems(list(POOL_PROPERTIES["average_pool_height"]))
+        self.ground_conditions.addItem("Custom")
         
         self.orifice_condition = QComboBox()
         self.orifice_condition.setToolTip("Select the orifice condition for the pool spill.")
@@ -2033,84 +2313,140 @@ class PoolSpillPage(QWidget):
         self.volumetric_flowrate = QLineEdit()
         self.volumetric_flowrate.setToolTip("Enter the volumetric flowrate in cubic meters per second.")
 
-        self.kinematic_viscosity = QLineEdit()
-        self.kinematic_viscosity.setToolTip("Enter the fuel's kinematic viscosity in square meters per second.")
-
         self.pool_depth = QLineEdit()
-        self.pool_depth.setToolTip("Required when Pool Fire Duration is checked; assumed pool depth in meters.")
+        self.pool_depth.setToolTip("Assumed uniform pool depth in meters, used only for "
+                       "operator intervention and pool-fire burn duration.")
+        self.ground_conditions.currentTextChanged.connect(self._update_pool_depth)
+        self.ground_conditions.setCurrentText("normal")
+        self._update_pool_depth()
 
-        self.average_evaporation_rate = QLineEdit()
-        self.average_evaporation_rate.setToolTip("Enter the average volumetric evaporation rate in cubic meters per second.")
-        
-        
-                # Input group
-        input_group = QGroupBox("Pool Spill Inputs")
-        
-        input_group.setMaximumWidth(760)
+        fuel_group, fuel_form = SprinklerPage._input_group("Fuel && Environment")
+        fuel_form.addRow("Fuel Material:", self.fuel_material)
+        fuel_form.addRow("Ambient Temperature (K):", self.ambient_temperature)
+        fuel_form.addRow("Wind Speed (m/s):", self.wind_speed)
 
-        form_layout = QFormLayout()
-        form_layout.setHorizontalSpacing(15)
-        form_layout.setVerticalSpacing(10)
-        form_layout2 = QFormLayout()
-        form_layout2.setHorizontalSpacing(15)
-        form_layout2.setVerticalSpacing(10)
+        release_group, release_form = SprinklerPage._input_group("Release && Surface")
+        release_form.addRow("Bund Area (m²):", self.bund_size)
+        release_form.addRow("Volumetric Flowrate (m³/s):", self.volumetric_flowrate)
+        release_form.addRow("Orifice Diameter (m):", self.orifice_diameter)
+        release_form.addRow("Orifice Condition:", self.orifice_condition)
+        release_form.addRow("Pressure Differential (Pa):", self.delta_p)
+        release_form.addRow("Surface Material:", self.surface_material)
+        release_form.addRow("Surface Weather:", self.surface_weather)
 
-        form_layout.addRow("Fuel Material:", self.fuel_material)
-        form_layout.addRow("Surface Weather:", self.surface_weather)
-        form_layout.addRow("Surface Material:", self.surface_material)
-        form_layout.addRow("Ground Conditions:", self.ground_conditions)
-        form_layout.addRow("Orifice Condition:", self.orifice_condition)
-        form_layout2.addRow("Ambient Temperature (K):",self.ambient_temperature)
-        form_layout2.addRow("Wind Speed (m/s):",self.wind_speed)
-        form_layout2.addRow("Bund Area (m²):",self.bund_size)
-        form_layout2.addRow("Volumetric Flowrate (m³/s):",self.volumetric_flowrate)
-        form_layout2.addRow("Orifice Diameter (m):", self.orifice_diameter)
-        form_layout2.addRow("Pressure Differential (Pa):", self.delta_p)
-        form_layout2.addRow("Kinematic Viscosity (m²/s):", self.kinematic_viscosity)
-        form_layout2.addRow("Pool Depth for Fire (m):", self.pool_depth)
+        self.pool_depth_group, depth_form = SprinklerPage._input_group("Pool Depth")
+        depth_form.addRow("Pool Depth (m):",
+                     SprinklerPage._with_preset(self.pool_depth, self.ground_conditions))
 
-        
-        input_group.setLayout(form_layout)
-        input_group2 = QGroupBox("Pool Spill Inputs")
-        input_group2.setMaximumWidth(760)
-        input_group2.setLayout(form_layout2)
-        main_layout.addWidget(input_group2)
+        self.oi_tickbox = QCheckBox("Operator Intervention")
+        self.oi_tickbox.setToolTip("Apply the intervention correlation to the assessed area. "
+                                 "The three baseline spill areas remain unchanged.")
+        self.pool_fire_tickbox = QCheckBox("Pool Fire Calculation")
+        self.pool_fire_tickbox.setToolTip("Calculate HRR, burn duration and flame heights "
+                                        "for the assessed pool area and entered depth.")
+        options_group = QGroupBox("Calculation Options")
+        options_layout = QVBoxLayout(options_group)
+        options_layout.addWidget(self.oi_tickbox)
+        options_layout.addWidget(self.pool_fire_tickbox)
 
-        main_layout.addWidget(input_group)
-
-        body_layout.addLayout(main_layout)
-
-        self.optional_group = QGroupBox("Operator Intervention Inputs")
-        self.optional_group.setMaximumWidth(760)
-        self.optional_group.setVisible(False)
-        self.optional_layout = QFormLayout(self.optional_group)
-        self.optional_layout.setHorizontalSpacing(15)
-        self.optional_layout.setVerticalSpacing(10)
-
+        self.optional_group, self.optional_layout = SprinklerPage._input_group("Operator Intervention")
         self.optional_layout.addRow("Operator Intervention Time (s):", self.operator_intervention_time)
-        self.optional_layout.addRow("Average Evaporation Rate (m³/s):", self.average_evaporation_rate)
 
-        main_layout.addWidget(self.optional_group)
-        self.results_label = QLabel("Enter the inputs and click Calculate. Results use unverified fuel-property data.")
+        input_column.insertWidget(2, options_group)
+        for group in (fuel_group, release_group, self.pool_depth_group, self.optional_group):
+            input_column.addWidget(group)
+        input_column.addStretch()
+
+        self._numeric_inputs = (
+            self.ambient_temperature, self.wind_speed, self.bund_size,
+            self.operator_intervention_time, self.orifice_diameter, self.delta_p,
+            self.volumetric_flowrate,
+            self.pool_depth,
+        )
+        for edit in self._numeric_inputs:
+            edit.returnPressed.connect(self.run_pool_calculation)
+
+        results_panel = QWidget()
+        results_panel.setMinimumWidth(300)
+        result_column = QVBoxLayout(results_panel)
+        result_column.setContentsMargins(0, 0, 0, 0)
+        result_column.setSpacing(12)
+        latest_group = QGroupBox("Latest Result")
+        latest_layout = QVBoxLayout(latest_group)
+        self.results_label = QLabel(self.PLACEHOLDER_TEXT)
+        self.results_label.setTextFormat(Qt.PlainText)
         self.results_label.setWordWrap(True)
-        body_layout.addWidget(self.results_label)
-        body_layout.addWidget(warning_label)
+        self.results_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        result_font = self.results_label.font()
+        result_font.setPointSize(12)
+        self.results_label.setFont(result_font)
+        latest_layout.addWidget(self.results_label)
+        result_column.addWidget(latest_group)
+
+        basis_label = QLabel(
+            "Spill areas: area_max is the evaporation-limited area capped by the bund; "
+            "area_permeability is the infiltration-limited area; area_combined combines "
+            "the two limits. Operator intervention is a separate adjusted area. "
+            "Its evaporation term is calculated from the existing fuel, wind and temperature inputs.\n\n"
+            "Fire outputs use the assessed area (intervention-adjusted when selected). "
+            "Flame heights are reported separately for Heskestad and Thomas."
+        )
+        basis_label.setWordWrap(True)
+        result_column.addWidget(basis_label)
+        warning_label = QLabel("PROVISIONAL - verify fuel properties, units, correlations "
+                               "and applicability independently before using these results for design.")
+        warning_label.setStyleSheet("color: red; font-weight: bold;")
+        warning_label.setWordWrap(True)
+        result_column.addWidget(warning_label)
+        result_column.addStretch()
+        body_layout.addWidget(input_panel)
+        body_layout.addWidget(results_panel, 1)
 
         self.oi_tickbox.toggled.connect(self.toggle_optional_inputs)
+        self.pool_fire_tickbox.toggled.connect(self.toggle_optional_inputs)
         self.toggle_optional_inputs()
 
     def toggle_optional_inputs(self):
         self.optional_group.setVisible(self.oi_tickbox.isChecked())
+        self.pool_depth_group.setVisible(self.oi_tickbox.isChecked() or self.pool_fire_tickbox.isChecked())
+
+    def _update_pool_depth(self, _text=None):
+        depth = POOL_PROPERTIES["average_pool_height"].get(self.ground_conditions.currentText())
+        self.pool_depth.setReadOnly(depth is not None)
+        if depth is not None:
+            self.pool_depth.setText(f"{depth:g}")
 
     def session_snapshot(self):
         return {"results_text": self.results_label.text()}
 
     def restore_session(self, state):
+        selected_depth = POOL_PROPERTIES["average_pool_height"].get(self.ground_conditions.currentText())
+        try:
+            saved_depth = float(self.pool_depth.text())
+        except ValueError:
+            saved_depth = selected_depth
+        if selected_depth is not None and saved_depth != selected_depth:
+            self.ground_conditions.setCurrentText("Custom")
+        self._update_pool_depth()
         self.toggle_optional_inputs()
         self.results_label.setText(state.get(
-            "results_text",
-            "Enter the inputs and click Calculate. Results use unverified fuel-property data.",
+            "results_text", self.PLACEHOLDER_TEXT,
         ))
+        self.copy_result_button.setEnabled(self.results_label.text().startswith("PROVISIONAL"))
+
+    def copy_latest_result(self):
+        if self.copy_result_button.isEnabled():
+            QApplication.clipboard().setText(self.results_label.text())
+
+    def clear_inputs(self):
+        for edit in self._numeric_inputs:
+            edit.clear()
+        self.ground_conditions.setCurrentText("normal")
+        self._update_pool_depth()
+
+    def clear_results(self):
+        self.results_label.setText(self.PLACEHOLDER_TEXT)
+        self.copy_result_button.setEnabled(False)
 
     def _pool_number(self, widget, label, allow_zero=False):
         text = widget.text().strip()
@@ -2138,69 +2474,638 @@ class PoolSpillPage(QWidget):
                 surface=self.surface_material.currentText(),
                 weather=self.surface_weather.currentText(),
                 orifice_condition=self.orifice_condition.currentText(),
-                kinematic_viscosity=self._pool_number(self.kinematic_viscosity, "Kinematic viscosity"),
                 pool_depth=(self._pool_number(self.pool_depth, "Pool depth")
-                            if self.pool_fire_tickbox.isChecked() else None),
+                            if self.oi_tickbox.isChecked() or self.pool_fire_tickbox.isChecked() else None),
                 ground_description=self.ground_conditions.currentText(),
                 intervention_time=(
                     self._pool_number(self.operator_intervention_time, "Operator intervention time", allow_zero=True)
-                    if self.oi_tickbox.isChecked() else None
-                ),
-                evaporation_rate=(
-                    self._pool_number(self.average_evaporation_rate, "Average evaporation rate")
                     if self.oi_tickbox.isChecked() else None
                 ),
                 include_fire=self.pool_fire_tickbox.isChecked(),
             )
         except (ValueError, KeyError, OverflowError, ZeroDivisionError) as exc:
             self.results_label.setText("Calculation not available for these inputs.")
+            self.copy_result_button.setEnabled(False)
             QMessageBox.warning(self, "Pool Calculation Error", str(exc))
             return
 
         lines = [
             "PROVISIONAL - fuel properties and units must be verified before use.",
-            f"Evaporation-limited area: {result['area_max_m2']:.4g} m²",
-            f"Permeability area: {result['area_permeability_m2']:.4g} m²",
-            f"Combined spill area: {result['area_combined_m2']:.4g} m²",
+            f"Fuel: {self.fuel_material.currentText()}",
+            "",
+            "POOL SPILL",
+            f"Maximum area (area_max, bund-capped): {result['area_max_m2']:.4g} m²",
+            f"Permeability area (area_permeability): {result['area_permeability_m2']:.4g} m²",
+            f"Combined area (area_combined): {result['area_combined_m2']:.4g} m²",
         ]
         if self.oi_tickbox.isChecked():
-            lines.append(f"Intervention-adjusted area: {result['pool_area_m2']:.4g} m²")
+            lines.append(f"Operator intervention area: {result['area_intervention_m2']:.4g} m²")
         if self.pool_fire_tickbox.isChecked():
             lines.extend((
+                "", "POOL FIRE",
+                f"Pool depth: {result['pool_depth_m']:.4g} m",
                 f"Pool diameter: {result['pool_diameter_m']:.4g} m",
                 f"Pool volume: {result['pool_volume_m3']:.4g} m³",
-                f"Heat release rate (table-derived, units unverified): {result['heat_release_rate']:.4g}",
+                f"Heat release rate: {result['heat_release_rate']:.4g} kW",
                 f"Burn duration: {result['burn_duration_s']:.4g} s",
                 f"Flame height (Heskestad): {result['flame_height_heskestad_m']:.4g} m",
                 f"Flame height (Thomas): {result['flame_height_thomas_m']:.4g} m",
             ))
         self.results_label.setText("\n".join(lines))
+        self.copy_result_button.setEnabled(True)
 
 
-# Placeholder page for receptor heat flux calculations.
+# Page for radiant heat flux received from a rectangular emitting panel.
 class ReceptorHeatFlux(QWidget):
-    """Placeholder window for the Receptor Heat Flux calculator."""
+    """UI page for the receptor heat flux (view factor) calculator."""
+    PLACEHOLDER_TEXT = "Run a calculation to see the received heat flux here."
+    HISTORY_HEADERS = ["Run", "Receptor ID", "Unit", "Input", "Distance to Receptor (m)",
+                       "Received Heat Flux (kW/m²)", "View Factor",
+                       "Emissive Power (kW/m²)", "Emitter Temp (K)", "Emissivity",
+                       "Panel Length (m)", "Panel Width (m)"]
+    UNIT_HEADERS = ["Unit", "Panel Length (m)", "Panel Width (m)"]
+    DEFAULT_PLOT_HEIGHT = 360
+    DISTANCE_POINT = "Single Point"
+    DISTANCE_RANGE = "Range"
+    MAX_RANGE_POINTS = 1000
+    MODE_HEAT_FLUX = "Emissive Power"
+    MODE_TEMPERATURE = "Emitter Temperature"
+    # mode -> (calculation function, emitter field attributes it consumes)
+    INPUT_MODES = {
+        MODE_HEAT_FLUX: (heat_flux_of_emitter, ("emissive_power",)),
+        MODE_TEMPERATURE: (temp_of_emitter, ("emitter_temperature", "emissivity")),
+    }
+    # (attribute, label, calculation keyword, tooltip)
+    EMITTER_FIELDS = [
+        ("emissive_power", "Emissive Power (kW/m²):", "emmissive_power",
+         "Emissive power of the radiating panel (kW/m²)."),
+        ("emitter_temperature", "Emitter Temperature (K):", "temp_of_emitter",
+         "Surface temperature of the radiating panel (K)."),
+        ("emissivity", "Emissivity (-):", "emissivity",
+         "Emissivity of the radiating panel (0 - 1)."),
+    ]
+    POINT_FIELDS = [
+        ("perp_distance_to_receptor", "Distance to Receptor (m):", "perp_distance_to_receptor",
+         "Distance from the emitter to the receptor (m)."),
+    ]
+    RANGE_FIELDS = [
+        ("range_start", "Range Start (m):", "range_start",
+         "First receptor distance in the range (m)."),
+        ("range_end", "Range End (m):", "range_end",
+         "Last receptor distance in the range (m)."),
+        ("range_step", "Range Step (m):", "range_step",
+         "Spacing between the calculated distances (m)."),
+    ]
+    PANEL_FIELDS = [
+        ("Panel Length (m)", "length_of_radiating_panel"),
+        ("Panel Width (m)", "width_of_radiating_panel"),
+    ]
+    NUMERIC_FIELDS = EMITTER_FIELDS + POINT_FIELDS + RANGE_FIELDS
+    FIELD_DEFAULTS = {**DEFAULT_HEAT_FLUX_INPUTS, "range_start": 1, "range_end": 20, "range_step": 1}
+
     def __init__(self, base_window):
         super().__init__()
         self.base_window = base_window
-        
-        self.emissive_power = QLineEdit()
-        self.emissive_power.setToolTip("Enter the emissive power in kW/m².\nMust be greater than 0.")
-        
-        self.perpendicular_distance = QLineEdit()
-        self.perpendicular_distance.setToolTip("Enter the perpendicular distance from the fire source to the receptor in meters.\nMust be greater than 0.")
-        
-        
+        self.result_history = []
 
-        label = QLabel("Receptor Heat Flux Calculator\n\nThis feature is not yet implemented.")
-        font = label.font()
-        font.setPointSize(18)
-        font.setBold(True)
-        label.setFont(font)
-        label.setAlignment(Qt.AlignCenter)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(label)
+        # --- Toolbar ---
+        toolbar = QToolBar("Receptor Heat Flux Calculator")
+        toolbar.setMovable(False)
+        toolbarcontents = QWidget()
+        toolbarcontents.setObjectName("toolbarContents")
+        toolbarlayout = QHBoxLayout()
+        toolbarlayout.setContentsMargins(0, 0, 0, 0)
+        toolbarlayout.setSpacing(6)
+        toolbarcontents.setLayout(toolbarlayout)
+        toolbar.addWidget(toolbarcontents)
+
+        run_button = QPushButton("Run")
+        run_button.setObjectName("runButton")
+        run_button.setShortcut(QKeySequence("Ctrl+Return"))
+        run_button.setToolTip("Run the receptor heat flux calculation (Ctrl+Enter).\n"
+                              "Pressing Enter in any input field also runs it.")
+        run_button.clicked.connect(self.run_heat_flux_calc)
+
+        self.copy_result_button = QPushButton("Copy Latest Result")
+        self.copy_result_button.setToolTip("Copy the latest received heat flux to the clipboard.\n"
+                                           "Range runs are copied as a distance / heat flux table.")
+        self.copy_result_button.setEnabled(False)
+        self.copy_result_button.clicked.connect(self.copy_latest_result)
+
+        defaults_button = QPushButton("Load Example Inputs")
+        defaults_button.setToolTip("Fill the inputs with the example values from the calculation module.")
+        defaults_button.clicked.connect(self.load_example_inputs)
+
+        clear_inputs_button = QPushButton("Clear Inputs")
+        clear_inputs_button.setToolTip("Clear all input fields. The results history is kept.")
+        clear_inputs_button.clicked.connect(self.clear_inputs)
+
+        clear_results_button = QPushButton("Clear Results")
+        clear_results_button.setObjectName("clearAllButton")
+        clear_results_button.setToolTip("Clear the latest result and the results history.")
+        clear_results_button.clicked.connect(self.clear_results)
+
+        toolbarlayout.addWidget(run_button)
+        toolbarlayout.addWidget(self.copy_result_button)
+        toolbarlayout.addWidget(_make_toolbar_separator())
+        toolbarlayout.addWidget(defaults_button)
+        toolbarlayout.addWidget(clear_inputs_button)
+        toolbarlayout.addWidget(clear_results_button)
+        page_layout.addWidget(toolbar)
+
+        # --- Body: inputs (left) | latest result + history (right) ---
+        body_layout = QHBoxLayout()
+        body_layout.setContentsMargins(20, 16, 20, 20)
+        body_layout.setSpacing(20)
+        page_layout.addLayout(body_layout, 1)
+
+        input_panel = QWidget()
+        input_panel.setMinimumWidth(360)
+        input_panel.setMaximumWidth(460)
+        input_column = QVBoxLayout(input_panel)
+        input_column.setContentsMargins(0, 0, 0, 0)
+        input_column.setSpacing(12)
+
+        title = QLabel("Receptor Heat Flux")
+        title_font = title.font()
+        title_font.setPointSize(18)
+        title_font.setBold(True)
+        title.setFont(title_font)
+
+        subtitle = QLabel("Radiant heat flux received from a rectangular emitting panel, "
+                          "using the view factor method (ArupCompute documentation). "
+                          "Received heat flux = emissive power × view factor, or "
+                          "ε σ T⁴ × view factor when the emitter temperature is entered.")
+        subtitle.setWordWrap(True)
+
+        self.input_mode = QComboBox()
+        self.input_mode.addItems(list(self.INPUT_MODES))
+        self.input_mode.setToolTip("Choose whether the emitter is defined by its emissive power "
+                                   "or by its temperature and emissivity.\n"
+                                   "Geometry inputs are shared by both methods.")
+
+        self.receptor_id = QLineEdit()
+        self.receptor_id.setPlaceholderText("e.g. R-01 (optional)")
+        self.receptor_id.setToolTip("Optional receptor identifier shown in the results history.")
+        self.receptor_id.returnPressed.connect(self.run_heat_flux_calc)
+
+        receptor_group, receptor_form = SprinklerPage._input_group("Emitter && Receptor")
+        receptor_form.addRow("Receptor ID:", self.receptor_id)
+        receptor_form.addRow("Emitter Input:", self.input_mode)
+        geometry_group, geometry_form = SprinklerPage._input_group("Geometry")
+        self._emitter_form = receptor_form
+        self._geometry_form = geometry_form
+
+        self.distance_mode = QComboBox()
+        self.distance_mode.addItems([self.DISTANCE_POINT, self.DISTANCE_RANGE])
+        self.distance_mode.setToolTip("Calculate at a single receptor distance, or at every step "
+                                      "across a range of distances and plot the result.")
+        geometry_form.addRow("Distance Input:", self.distance_mode)
+
+        for fields, form in ((self.EMITTER_FIELDS, receptor_form),
+                             (self.POINT_FIELDS + self.RANGE_FIELDS, geometry_form)):
+            for attribute, label, key, tooltip in fields:
+                edit = QLineEdit()
+                edit.setPlaceholderText(f"e.g. {self.FIELD_DEFAULTS[key]:g}")
+                edit.setToolTip(f"{tooltip}\nMust be greater than 0.")
+                edit.returnPressed.connect(self.run_heat_flux_calc)
+                setattr(self, attribute, edit)
+                form.addRow(label, edit)
+
+        self.input_mode.currentTextChanged.connect(self._update_mode_fields)
+        self.distance_mode.currentTextChanged.connect(self._update_mode_fields)
+        self._update_mode_fields()
+
+        units_group = QGroupBox("Emitter Units")
+        units_layout = QVBoxLayout(units_group)
+        units_hint = QLabel("Each unit uses the emitter and distance inputs above with its own "
+                            "panel size, and is plotted as a separate curve.")
+        units_hint.setWordWrap(True)
+        self.units_table = QTableWidget(0, len(self.UNIT_HEADERS))
+        self.units_table.setHorizontalHeaderLabels(self.UNIT_HEADERS)
+        self.units_table.verticalHeader().setVisible(False)
+        self.units_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.units_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.units_table.setMinimumHeight(140)
+        self.units_table.setToolTip("Double-click a cell to edit it.\n"
+                                    "Panel length and width must be greater than 0.")
+        add_unit_button = QPushButton("+ Unit")
+        add_unit_button.setToolTip("Add another unit geometry.")
+        add_unit_button.clicked.connect(lambda: self._add_unit_row())
+        remove_unit_button = QPushButton("- Unit")
+        remove_unit_button.setToolTip("Remove the selected unit (or the last one).")
+        remove_unit_button.clicked.connect(self._remove_unit_row)
+        unit_buttons = QHBoxLayout()
+        unit_buttons.addWidget(add_unit_button)
+        unit_buttons.addWidget(remove_unit_button)
+        unit_buttons.addStretch()
+        units_layout.addWidget(units_hint)
+        units_layout.addWidget(self.units_table)
+        units_layout.addLayout(unit_buttons)
+        self._add_unit_row()
+
+        input_column.addWidget(title)
+        input_column.addWidget(subtitle)
+        input_column.addWidget(receptor_group)
+        input_column.addWidget(geometry_group)
+        input_column.addWidget(units_group)
+        input_column.addStretch()
+
+        # Scrollable results column: latest result, plot, then history table
+        results_panel = QWidget()
+        result_column = QVBoxLayout(results_panel)
+        result_column.setContentsMargins(0, 0, 8, 0)
+        result_column.setSpacing(12)
+
+        latest_group = QGroupBox("Latest Result")
+        latest_layout = QVBoxLayout(latest_group)
+        latest_layout.setSpacing(4)
+        self.latest_value_label = QLabel("—")
+        value_font = self.latest_value_label.font()
+        value_font.setPointSize(28)
+        value_font.setBold(True)
+        self.latest_value_label.setFont(value_font)
+        self.latest_value_label.setAlignment(Qt.AlignCenter)
+        self.latest_value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self.results_label = QLabel(self.PLACEHOLDER_TEXT)
+        self.results_label.setWordWrap(True)
+        self.results_label.setAlignment(Qt.AlignCenter)
+        self.results_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        latest_layout.addWidget(self.latest_value_label)
+        latest_layout.addWidget(self.results_label)
+
+        plot_group = QGroupBox("Heat Flux vs Distance")
+        plot_layout = QVBoxLayout(plot_group)
+        self.figure = Figure(figsize=(6, 3.6), layout="tight")
+        self.axes = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+
+        self.plot_height = QSpinBox()
+        self.plot_height.setRange(200, 2000)
+        self.plot_height.setSingleStep(20)
+        self.plot_height.setSuffix(" px")
+        self.plot_height.setValue(self.DEFAULT_PLOT_HEIGHT)
+        self.plot_height.setToolTip("Height of the plot.")
+        self.plot_width = QSpinBox()
+        self.plot_width.setRange(0, 4000)
+        self.plot_width.setSingleStep(50)
+        self.plot_width.setSuffix(" px")
+        self.plot_width.setSpecialValueText("Auto")
+        self.plot_width.setToolTip("Width of the plot. 'Auto' fits the available space; "
+                                   "wider plots can be scrolled horizontally.")
+        self.plot_height.valueChanged.connect(self._apply_plot_size)
+        self.plot_width.valueChanged.connect(self._apply_plot_size)
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Plot height:"))
+        size_row.addWidget(self.plot_height)
+        size_row.addSpacing(12)
+        size_row.addWidget(QLabel("Plot width:"))
+        size_row.addWidget(self.plot_width)
+        size_row.addStretch()
+        self._apply_plot_size()
+
+        plot_layout.addLayout(size_row)
+        plot_layout.addWidget(NavigationToolbar2QT(self.canvas, plot_group))
+        plot_layout.addWidget(self.canvas)
+
+        history_group = QGroupBox("Results History")
+        history_layout = QVBoxLayout(history_group)
+        history_hint = QLabel("Every run is kept until Clear Results is pressed. The newest run "
+                              "is listed first; a range run adds one row per distance.")
+        history_hint.setWordWrap(True)
+
+        self.history_table = QTableWidget(0, len(self.HISTORY_HEADERS))
+        self.history_table.setMinimumHeight(280)
+        self.history_table.setHorizontalHeaderLabels(self.HISTORY_HEADERS)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.history_table.verticalHeader().setVisible(False)
+        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+
+        history_layout.addWidget(history_hint)
+        history_layout.addWidget(self.history_table)
+
+        warning_label = QLabel("Provisional calculator - verify the method, inputs and units "
+                               "independently before relying on the results for design.")
+        warning_label.setStyleSheet("color: red; font-weight: bold;")
+        warning_label.setWordWrap(True)
+
+        result_column.addWidget(latest_group)
+        result_column.addWidget(plot_group)
+        result_column.addWidget(history_group)
+        result_column.addWidget(warning_label)
+
+        results_scroll = QScrollArea()
+        results_scroll.setWidgetResizable(True)
+        results_scroll.setFrameShape(QFrame.NoFrame)
+        results_scroll.setWidget(results_panel)
+
+        body_layout.addWidget(input_panel)
+        body_layout.addWidget(results_scroll, 1)
+        self._draw_plot([])
+
+    def _apply_plot_size(self, _value=None):
+        self.canvas.setFixedHeight(self.plot_height.value())
+        width = self.plot_width.value()
+        if width:
+            self.canvas.setFixedWidth(width)
+        else:
+            self.canvas.setMinimumWidth(0)
+            self.canvas.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX
+
+    def _add_unit_row(self, name=None, length="", width=""):
+        row = self.units_table.rowCount()
+        self.units_table.insertRow(row)
+        for column, text in enumerate((name or f"Unit {row + 1}", length, width)):
+            self.units_table.setItem(row, column, QTableWidgetItem(text))
+
+    def _remove_unit_row(self):
+        table = self.units_table
+        if table.rowCount() <= 1:
+            QMessageBox.information(self, "Remove Unit", "At least one unit is required.")
+            return
+        row = table.currentRow()
+        table.removeRow(row if row >= 0 else table.rowCount() - 1)
+
+    def _set_units(self, units):
+        self.units_table.setRowCount(0)
+        for name, length, width in units:
+            self._add_unit_row(name, length, width)
+
+    def _unit_rows(self):
+        """Raw (name, length, width) text for every row of the units table."""
+        rows = []
+        for row in range(self.units_table.rowCount()):
+            cells = [self.units_table.item(row, column) for column in range(len(self.UNIT_HEADERS))]
+            rows.append(tuple(cell.text().strip() if cell is not None else "" for cell in cells))
+        return rows
+
+    def _read_units(self):
+        """Validated [(unit name, panel geometry kwargs), ...] from the units table."""
+        units = []
+        for row, (name, *texts) in enumerate(self._unit_rows(), 1):
+            name = name or f"Unit {row}"
+            geometry = {key: self._parse_positive(f"{name} {label}", text, key)
+                        for (label, key), text in zip(self.PANEL_FIELDS, texts)}
+            units.append((name, geometry))
+        if not units:
+            raise ValueError("Add at least one unit.")
+        names = [name for name, _geometry in units]
+        if len(set(names)) != len(names):
+            raise ValueError("Each unit needs a different name.")
+        return units
+
+    def _update_mode_fields(self, _text=None):
+        """Show only the inputs the selected emitter and distance options consume."""
+        _function, used = self.INPUT_MODES[self.input_mode.currentText()]
+        for attribute, *_rest in self.EMITTER_FIELDS:
+            self._emitter_form.setRowVisible(getattr(self, attribute), attribute in used)
+        is_range = self.distance_mode.currentText() == self.DISTANCE_RANGE
+        for attribute, *_rest in self.POINT_FIELDS:
+            self._geometry_form.setRowVisible(getattr(self, attribute), not is_range)
+        for attribute, *_rest in self.RANGE_FIELDS:
+            self._geometry_form.setRowVisible(getattr(self, attribute), is_range)
+
+    def _distances(self):
+        """Receptor distances to calculate: the single point, or every step of the range."""
+        if self.distance_mode.currentText() != self.DISTANCE_RANGE:
+            return [self._read_fields(self.POINT_FIELDS)["perp_distance_to_receptor"]]
+        values = self._read_fields(self.RANGE_FIELDS)
+        start, end, step = values["range_start"], values["range_end"], values["range_step"]
+        if end <= start:
+            raise ValueError("Range End must be greater than Range Start.")
+        count = int(math.floor((end - start) / step + 1e-9)) + 1
+        if count > self.MAX_RANGE_POINTS:
+            raise ValueError(f"The range gives {count} distances - increase the step so there "
+                             f"are no more than {self.MAX_RANGE_POINTS}.")
+        return [round(start + index * step, 10) for index in range(count)]
+
+    def _read_fields(self, fields):
+        """Collect and validate line-edit values as calculation keyword arguments."""
+        return {key: self._parse_positive(label.rstrip(":"), getattr(self, attribute).text().strip(), key)
+                for attribute, label, key, _tooltip in fields}
+
+    @staticmethod
+    def _parse_positive(name, text, key):
+        if not text:
+            raise ValueError(f"{name} is required.")
+        try:
+            value = float(text)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a valid number.") from exc
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and greater than 0.")
+        if key == "emissivity" and value > 1:
+            raise ValueError(f"{name} must not be greater than 1.")
+        return value
+
+    def run_heat_flux_calc(self):
+        mode = self.input_mode.currentText()
+        calculation, used = self.INPUT_MODES[mode]
+        emitter_fields = [field for field in self.EMITTER_FIELDS if field[0] in used]
+        try:
+            inputs = self._read_fields(emitter_fields)
+            units = self._read_units()
+            distances = self._distances()
+            results = [(name, geometry, distance,
+                        calculation(**inputs, **geometry, perp_distance_to_receptor=distance))
+                       for name, geometry in units for distance in distances]
+        except ValueError as err:
+            QMessageBox.warning(self, "Input Error", str(err))
+            return
+        except (OverflowError, ZeroDivisionError) as err:
+            QMessageBox.critical(self, "Calculation Error", f"Failed to run calculation:\n{err}")
+            return
+
+        receptor_id = self.receptor_id.text().strip() or "Receptor-1"
+        run = self._latest_run_number() + 1
+        records = [{
+            "run": run,
+            "receptor_id": receptor_id,
+            "unit_name": name,
+            "input_mode": mode,
+            "distance_mode": self.distance_mode.currentText(),
+            "perp_distance_to_receptor": distance,
+            "received_heat_flux": result["received_heat_flux"],
+            "view_factor": result["view_factor"],
+            **inputs,
+            **geometry,
+        } for name, geometry, distance, result in results]
+        self.result_history.extend(records)
+
+        if mode == self.MODE_TEMPERATURE:
+            emitter_text = (f"Emitter {inputs['temp_of_emitter']:g} K, "
+                            f"emissivity {inputs['emissivity']:g}")
+        else:
+            emitter_text = f"Emissive power {inputs['emmissive_power']:g} kW/m²"
+        if len(records) == 1:
+            record = records[0]
+            self.results_label.setText(
+                f"Receptor {receptor_id} · {record['unit_name']} · "
+                f"view factor {record['view_factor']:.4f}\n{emitter_text} · panel "
+                f"{record['length_of_radiating_panel']:g} m × "
+                f"{record['width_of_radiating_panel']:g} m at {distances[0]:g} m"
+            )
+        else:
+            peak = max(records, key=lambda record: record["received_heat_flux"])
+            unit_text = units[0][0] if len(units) == 1 else f"{len(units)} units"
+            distance_text = (f"{len(distances)} distances from {distances[0]:g} m to "
+                             f"{distances[-1]:g} m" if len(distances) > 1
+                             else f"at {distances[0]:g} m")
+            self.results_label.setText(
+                f"Receptor {receptor_id} · {unit_text} · {distance_text}\n{emitter_text} · "
+                f"peak at {peak['perp_distance_to_receptor']:g} m ({peak['unit_name']})"
+            )
+        self._refresh_result_display()
+
+    def _latest_run_number(self):
+        return max((record.get("run", 0) for record in self.result_history), default=0)
+
+    def _latest_run_records(self):
+        if not self.result_history:
+            return []
+        run = self._latest_run_number()
+        return [record for record in self.result_history if record.get("run") == run]
+
+    def _draw_plot(self, records):
+        axes = self.axes
+        axes.clear()
+        axes.set_xlabel("Distance to Receptor (m)")
+        axes.set_ylabel("Received Heat Flux (kW/m²)")
+        axes.grid(True, alpha=0.3)
+        if records:
+            curves = {}
+            for record in records:
+                curves.setdefault(record.get("unit_name", "Unit 1"), []).append(record)
+            for name, unit_records in curves.items():
+                axes.plot([record.get("perp_distance_to_receptor") for record in unit_records],
+                          [record.get("received_heat_flux") for record in unit_records],
+                          marker="o", markersize=4, label=name)
+            if len(curves) > 1:
+                axes.legend()
+            axes.set_title(f"{records[0].get('receptor_id', '')} - "
+                           f"{records[0].get('input_mode', self.MODE_HEAT_FLUX)}")
+        else:
+            axes.text(0.5, 0.5, "Run a calculation to plot heat flux against distance.",
+                      transform=axes.transAxes, ha="center", va="center", color="gray")
+        self.canvas.draw_idle()
+
+    def _refresh_result_display(self):
+        """Redraw the latest-result value, plot and history table from stored state."""
+        latest = self._latest_run_records()
+        if not latest:
+            self.latest_value_label.setText("—")
+        elif len(latest) == 1:
+            self.latest_value_label.setText(f"{latest[0]['received_heat_flux']:.3f} kW/m²")
+        else:
+            peak = max(record["received_heat_flux"] for record in latest)
+            self.latest_value_label.setText(f"Peak {peak:.3f} kW/m²")
+        self.copy_result_button.setEnabled(bool(latest))
+        self._draw_plot(latest)
+
+        latest_run = self._latest_run_number()
+        fmt = SprinklerPage._fmt
+        table = self.history_table
+        table.setRowCount(len(self.result_history))
+        for row, record in enumerate(reversed(self.result_history)):
+            values = [
+                str(record.get("run", "")),
+                str(record.get("receptor_id", "")),
+                str(record.get("unit_name", "Unit 1")),
+                str(record.get("input_mode", self.MODE_HEAT_FLUX)),
+                fmt(record.get("perp_distance_to_receptor"), "g"),
+                fmt(record.get("received_heat_flux"), ".3f"),
+                fmt(record.get("view_factor"), ".4f"),
+                fmt(record.get("emmissive_power"), "g"),
+                fmt(record.get("temp_of_emitter"), "g"),
+                fmt(record.get("emissivity"), "g"),
+                fmt(record.get("length_of_radiating_panel"), "g"),
+                fmt(record.get("width_of_radiating_panel"), "g"),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignCenter)
+                if record.get("run") == latest_run:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                table.setItem(row, column, item)
+
+    def copy_latest_result(self):
+        latest = self._latest_run_records()
+        if not latest:
+            return
+        if len(latest) == 1:
+            text = f"{latest[0]['received_heat_flux']:.3f} kW/m²"
+        else:
+            units = list(dict.fromkeys(record.get("unit_name", "Unit 1") for record in latest))
+            distances = sorted({record["perp_distance_to_receptor"] for record in latest})
+            flux = {(record.get("unit_name", "Unit 1"), record["perp_distance_to_receptor"]):
+                    record["received_heat_flux"] for record in latest}
+            text = "\n".join(
+                ["Distance (m)\t" + "\t".join(f"{unit} (kW/m²)" for unit in units)] + [
+                    f"{distance:g}\t" + "\t".join(
+                        f"{flux[(unit, distance)]:.3f}" if (unit, distance) in flux else ""
+                        for unit in units)
+                    for distance in distances])
+        QApplication.clipboard().setText(text)
+        self.copy_result_button.setText("Copied!")
+        QTimer.singleShot(1500, lambda: self.copy_result_button.setText("Copy Latest Result"))
+
+    def load_example_inputs(self):
+        for attribute, _label, key, _tooltip in self.NUMERIC_FIELDS:
+            getattr(self, attribute).setText(f"{self.FIELD_DEFAULTS[key]:g}")
+        self._set_units([("Unit 1", *(f"{self.FIELD_DEFAULTS[key]:g}" for _label, key in self.PANEL_FIELDS))])
+
+    def clear_inputs(self):
+        self.receptor_id.clear()
+        for attribute, *_rest in self.NUMERIC_FIELDS:
+            getattr(self, attribute).clear()
+        self._set_units([("Unit 1", "", "")])
+
+    def clear_results(self):
+        if self.result_history:
+            reply = QMessageBox.question(
+                self, "Clear Results", "Clear the latest result and the results history?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        self.result_history = []
+        self.results_label.setText(self.PLACEHOLDER_TEXT)
+        self._refresh_result_display()
+
+    def session_snapshot(self):
+        return {
+            "results_text": self.results_label.text(),
+            "history": self.result_history,
+            "units": [{"name": name, "length": length, "width": width}
+                      for name, length, width in self._unit_rows()],
+            "plot_height": self.plot_height.value(),
+            "plot_width": self.plot_width.value(),
+        }
+
+    def restore_session(self, state):
+        units = state.get("units")
+        if isinstance(units, list) and units:
+            self._set_units([(str(unit.get("name", "")), str(unit.get("length", "")),
+                              str(unit.get("width", "")))
+                             for unit in units if isinstance(unit, dict)])
+        for spin_box, key in ((self.plot_height, "plot_height"), (self.plot_width, "plot_width")):
+            if type(state.get(key)) is int:
+                spin_box.setValue(state[key])
+        self.result_history = list(state.get("history", []))
+        for index, record in enumerate(self.result_history, 1):
+            record.setdefault("run", index)  # saves made before range runs existed
+        self.results_label.setText(state.get("results_text", self.PLACEHOLDER_TEXT))
+        self._refresh_result_display()
 
                
 if __name__ == "__main__": 

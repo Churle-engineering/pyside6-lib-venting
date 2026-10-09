@@ -16,6 +16,7 @@ from information import (
     CALC_METHOD_MODULE_VOLUME_UL9540A,
     LIBInputs,
     LIBSpec,
+    MAX_CALC_DURATION_S,
 )
 
 
@@ -63,7 +64,8 @@ def input_problems(inputs: LIBInputs) -> list[str]:
         label = LIBInputs.__dataclass_fields__[field_name].metadata["label"]
         problems.extend(number_problems(getattr(inputs, field_name), label,
                                         positive=True, integer=True))
-    problems.extend(number_problems(inputs.calc_duration, "Calculation Duration", positive=True))
+    problems.extend(number_problems(inputs.calc_duration, "Calculation Duration",
+                                    positive=True, maximum=MAX_CALC_DURATION_S))
     if inputs.calc_method not in CALCULATION_METHODS:
         problems.append(f"Unsupported calculation method {inputs.calc_method!r}.")
     return problems

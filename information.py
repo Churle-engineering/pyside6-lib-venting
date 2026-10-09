@@ -2,6 +2,8 @@
 # -------- data classes ----------
 from dataclasses import dataclass, field
 
+MAX_CALC_DURATION_S = 3 * 24 * 60 * 60
+
 # ----------- INPUTS --------------
 
 @dataclass
@@ -53,7 +55,7 @@ class LIBInputs:
         default=3600,
         metadata={"label": "Calculation Duration",
                   "units": 's',
-                  "tooltip": "The duration of the calculation in seconds."
+                  "tooltip": f"The duration of the calculation in seconds. Maximum: {MAX_CALC_DURATION_S} s (3 days)."
                   }
     )
     ventilation_rate: float = field(
@@ -363,24 +365,24 @@ BATTERY_CHEMISTRY_DATA = {
         # TODO: replace with source-verified shares. The raw literature values summed to
         # 141.9%, so every species below was scaled by 100/141.9 to total 100%.
         'composition': {
-            'co': 42.29,  # Carbon monoxide
-            'co2': 7.05,  # Carbon dioxide
-            'h2': 7.05,       # Hydrogen
-            'thc': 7.05,  # Total hydrocarbons
-            'no2': 6.84,               # Nitrogen dioxide
+            'co': 42,  # Carbon monoxide
+            'co2': 10,  # Carbon dioxide
+            'h2': 7,       # Hydrogen
+            'thc': 7,  # Total hydrocarbons
+            'no2': 7,               # Nitrogen dioxide
             'hcl': 1,               # Hydrogen chloride
-            'hf': 2.61,                # Hydrogen fluoride
-            'hcn': 0.49,               # Hydrogen cyanide
-            'benzene': 9.58,          # Benzene
-            'toluene': 2.89,
-            'so2': 2.11,
-            'c2h5f': 0.70,
+            'hf': 3,                # Hydrogen fluoride
+            'hcn': 1,               # Hydrogen cyanide
+            'benzene': 10,          # Benzene
+            'toluene': 2,
+            'so2': 2,
+            'c2h5f': 0,
             'methanol': 0.70,
-            'dec': 1.69,
-            'dmc': 1.76,
-            'propane': 1.06,
-            'no': 2.82,
-            'h2o': 3.52
+            'dec': 1,
+            'dmc': 1,
+            'propane': 1,
+            'no': 2,
+            'h2o': 3
         },
         'description': 'Nickel Manganese Cobalt Oxide (NMC) - High energy density cathode material',
         'reference': 'Peter Literature Data'
@@ -396,23 +398,23 @@ BATTERY_CHEMISTRY_DATA = {
         # TODO: replace with source-verified shares. The raw literature values summed to
         # 161.9%, so every species below was scaled by 100/161.9 to total 100%.
         'composition': {
-            'co': 49.41,  # Carbon monoxide
-            'h2': 6.18,       # Hydrogen
-            'thc': 6.18,  # Total hydrocarbons
-            'no2': 5.99,               # Nitrogen dioxide
-            'hcl': 5.99,               # Hydrogen chloride
-            'hf': 2.29,                # Hydrogen fluoride
-            'hcn': 0.43,               # Hydrogen cyanide
-            'benzene': 8.40,          # Benzene
-            'toluene': 2.53,
-            'so2': 1.85,
-            'c2h5f': 0.62,
-            'methanol': 0.62,
-            'dec': 1.48,
-            'dmc': 1.54,
-            'propane': 0.93,
-            'no': 2.47,
-            'h2o': 3.09
+            'co': 50,  # Carbon monoxide
+            'h2': 20,       # Hydrogen
+            'thc': 10,  # Total hydrocarbons
+            'no2': 5,               # Nitrogen dioxide
+            'hcl': 5,               # Hydrogen chloride
+            'hf': 3,                # Hydrogen fluoride
+            'hcn': 2,               # Hydrogen cyanide
+            'benzene': 8,          # Benzene
+            'toluene': 2,
+            'so2': 0,
+            'c2h5f': 0,
+            'methanol': 0,
+            'dec': 0,
+            'dmc': 0,
+            'propane': 0,
+            'no': 0,
+            'h2o': 0
         },
         'description': 'Lithium Iron Phosphate (LFP) - Safer, more stable cathode material',
         'reference': 'DNV.GL Technical Reference for Li-ion Battery Explosion Risk and Fire Suppression'
@@ -795,29 +797,200 @@ class PoolFireInputs:
     pool_depth: float     # in meters
     surface_area: float   # in square meters
 
-
-POOL_SPREAD_DATA = { #reference is SPFE Handbook of fire protection engineering, 3rd edition 2002, page 3-26
-    'methanol':           {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 32.04},
-    'ethanol':        {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 46.07},
-    'butane':           {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 58.12},
-    'benzene':        {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'hexane':           {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 86.18},
-    'heptane':         {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 100.21},
-    'xylene':            {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 106.16},
-    'acetone':           {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 58.08},
-    'dioxane':           {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 88.11},
-    'diethyl ether':       {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 74.12},
-    'benzine':           {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'gasoline':         {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'kerosine':        {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'diesel':             {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'jp-4':              {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'jp-5':             {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'transformer oil':    {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    '561 silicon transformer fluid': {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'fuel oil':          {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'crude oil':          {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
-    'lube oil':         {'mass burning rate': 3.313, 'heat of combustion': 3.313, 'density': 1.4, 'empirical constant': 78.11, 'liquid vapour pressure': 0.13, 'molar mass': 78.11},
+# mass burning rate: kg/(m2 s), asymptotic pool-fire mass flux
+# heat of combustion: kJ/kg
+# density: kg/m3 at approximately 20 C
+# empirical constant: 1/m, coefficient in 1 - exp(-k * pool_diameter); values below
+# are transcribed from the supplied pool-fire fuel table.
+# liquid vapour pressure: Pa (Pascals) at approximately 20 C
+# molar mass: kg/kmol
+# Mass burning rates, heats of combustion, densities, and empirical constants are
+# transcribed from the supplied pool-fire fuel table.
+POOL_SPREAD_DATA = {
+    'methanol': {
+        'mass burning rate': 0.017,
+        'heat of combustion': 20000,
+        'density': 796,
+        'empirical constant': 100,
+        'liquid vapour pressure': 13000.0,
+        'molar mass': 32.04,
+    },
+    'ethanol': {
+        'mass burning rate': 0.015,
+        'heat of combustion': 26800,
+        'density': 794,
+        'empirical constant': 100,
+        'liquid vapour pressure': 5900.0,
+        'molar mass': 46.07,
+    },
+    'butane': {
+        'mass burning rate': 0.078,
+        'heat of combustion': 45700,
+        'density': 573,
+        'empirical constant': 2.7,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 0.5e-6,
+    },
+    'benzene': {
+        'mass burning rate': 0.085,
+        'heat of combustion': 40100,
+        'density': 874,
+        'empirical constant': 2.7,
+        'liquid vapour pressure': 10000.0,
+        'molar mass': 78.11,
+        'kinematic_viscosity': 0.89e-6,
+    },
+    'hexane': {
+        'mass burning rate': 0.074,
+        'heat of combustion': 44700,
+        'density': 650,
+        'empirical constant': 1.9,
+        'liquid vapour pressure': 16200.0,
+        'molar mass': 86.18,
+        'kinematic_viscosity': 0.64e-6,
+    },
+    'heptane': {
+        'mass burning rate': 0.101,
+        'heat of combustion': 44600,
+        'density': 675,
+        'empirical constant': 1.1,
+        'liquid vapour pressure': 4600.0,
+        'molar mass': 100.21,
+        'kinematic_viscosity': 0.9e-6,
+    },
+    'xylene': {
+        'mass burning rate': 0.09,
+        'heat of combustion': 40800,
+        'density': 870,
+        'empirical constant': 1.4,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 0.93e-6,
+    },
+    'acetone': {
+        'mass burning rate': 0.041,
+        'heat of combustion': 25800,
+        'density': 791,
+        'empirical constant': 1.9,
+        'liquid vapour pressure': 24000.0,
+        'molar mass': 58.08,
+        'kinematic_viscosity': 0.41e-6,
+    },
+    'dioxane': {
+        'mass burning rate': 0.018,
+        'heat of combustion': 26200,
+        'density': 1035,
+        'empirical constant': 5.4,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+    },
+    'diethyl ether': {
+        'mass burning rate': 0.085,
+        'heat of combustion': 34200,
+        'density': 714,
+        'empirical constant': 0.7,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 0.32e-6,
+    },
+    'benzine': {
+        'mass burning rate': 0.048,
+        'heat of combustion': 44700,
+        'density': 740,
+        'empirical constant': 3.6,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+    },
+    'gasoline': {
+        'mass burning rate': 0.055,
+        'heat of combustion': 43700,
+        'density': 740,
+        'empirical constant': 2.1,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 0.88e-6,
+    },
+    'kerosine': {
+        'mass burning rate': 0.039,
+        'heat of combustion': 43200,
+        'density': 820,
+        'empirical constant': 3.5,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 2.71e-6,
+    },
+    'diesel': {
+        # Representative conventional diesel, not a universal formulation.
+        'mass burning rate': 0.045,
+        'heat of combustion': 44400,
+        'density': 918,
+        'empirical constant': 2.1,
+        # BP Diesel Fuel SDS reports 0.093 kPa at 20 C for its product; this is
+        # grade-specific. Use the IEA-AMF MW midpoint for a blend approximation.
+        'liquid vapour pressure': 93.0,
+        'molar mass': 200.0,
+        'kinematic_viscosity': 2e-6,
+    },
+    'jp-4': {
+        'mass burning rate': 0.051,
+        'heat of combustion': 43500,
+        'density': 760,
+        'empirical constant': 3.6,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+    },
+    'jp-5': {
+        'mass burning rate': 0.054,
+        'heat of combustion': 43000,
+        'density': 810,
+        'empirical constant': 1.6,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+    },
+    'transformer oil': {
+        'mass burning rate': 0.039,
+        'heat of combustion': 46000,
+        'density': 760,
+        'empirical constant': 0.7,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 24e-6,
+    },
+    '561 silicon transformer fluid': {
+        'mass burning rate': 0.005,
+        'heat of combustion': 28100,
+        'density': 960,
+        'empirical constant': 100,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+    },
+    'fuel oil': {
+        'mass burning rate': 0.035,
+        'heat of combustion': 39700,
+        'density': 970,
+        'empirical constant': 1.7,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 3e-6,
+    },
+    'crude oil': {
+        'mass burning rate': 0.0335,
+        'heat of combustion': 42600,
+        'density': 855,
+        'empirical constant': 2.8,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+        'kinematic_viscosity': 3e-6,
+    },
+    'lube oil': {
+        'mass burning rate': 0.039,
+        'heat of combustion': 46000,
+        'density': 760,
+        'empirical constant': 0.7,
+        # 'liquid vapour pressure': ...,
+        # 'molar mass': ...,
+    },
 }
 
 POOL_PROPERTIES = {

@@ -10,16 +10,20 @@ whole column/row, and "Copy Table" copies the whole thing as tab-separated text
 """
 
 from dataclasses import dataclass
+from html import escape
 from typing import Callable
 
+from PySide6.QtCore import QMimeData
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QDialogButtonBox,
-                               QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
+                               QCheckBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 
+from information import CHEMICAL_PROPERTIES
 
 NOT_AVAILABLE = "-"
+DEFAULT_TOXIC_SPECIES = ("co", "hcn", "hf", "benzene")
 
 
 @dataclass(slots=True)
@@ -30,6 +34,8 @@ class ColumnSpec:
     header: str
     value: Callable
     fmt: str = "{:.3f}"
+    reference_percent: Callable | None = None
+    reference_label: str = ""
 
 
 def _format(value, fmt):
@@ -51,7 +57,8 @@ def _crossing_time(summary):
 GENERAL_COLUMNS = [
     ColumnSpec("calc_method", "Calculation Method", lambda s: s.calc_method, "{}"),
     ColumnSpec("peak_flam_vv", "Peak Flammable Gas (v/v%)", lambda s: s.peak_flammable_vv),
-    ColumnSpec("peak_flam_ppm", "Peak Flammable Gas (ppm)", lambda s: s.peak_flammable_ppm, "{:.0f}"),
+    ColumnSpec("peak_flam_ppm", "Peak Flammable Gas (ppm)", lambda s: s.peak_flammable_ppm, "{:.0f}",
+               lambda s: s.peak_percent_of_lfl if s.lfl_percent else None, "LFL"),
     ColumnSpec("peak_flam_mgl", "Peak Flammable Gas (mg/L)", lambda s: s.peak_flammable_mgl),
     ColumnSpec("peak_flam_time", "Time of Peak Flammable Gas (s)", lambda s: s.peak_flammable_time, "{:.0f}"),
     ColumnSpec("lfl_label", "LFL Basis", lambda s: s.lfl_label, "{}"),
@@ -72,31 +79,40 @@ def _species_getter(attribute, species, toxic):
     return getter
 
 
+def _species_percent_lfl(species):
+    peak_vv = _species_getter("peak_vv", species, False)
+    def getter(summary):
+        concentration = peak_vv(summary)
+        lfl = CHEMICAL_PROPERTIES.get(species, {}).get("lfl")
+        return concentration / lfl * 100.0 if concentration is not None and lfl else None
+    return getter
+
+
 def _species_columns(summaries):
     """Per-species columns for every species present in the given summaries."""
     columns = []
     seen = set()
 
+    toxic_species = dict.fromkeys(DEFAULT_TOXIC_SPECIES)
     for summary in summaries:
-        for species in summary.toxic_species:
-            if ("tox", species.species) in seen:
-                continue
-            seen.add(("tox", species.species))
-            name = species.species.upper()
-            columns.extend([
-                ColumnSpec(f"tox:{species.species}:peak_ppm", f"{name} Peak (ppm)",
-                           _species_getter("peak_ppm", species.species, True), "{:.1f}"),
-                ColumnSpec(f"tox:{species.species}:peak_vv", f"{name} Peak (v/v%)",
-                           _species_getter("peak_vv", species.species, True), "{:.4f}"),
-                ColumnSpec(f"tox:{species.species}:peak_mgl", f"{name} Peak (mg/L)",
-                           _species_getter("peak_mgl", species.species, True), "{:.4f}"),
-                ColumnSpec(f"tox:{species.species}:peak_time", f"{name} Time of Peak (s)",
-                           _species_getter("peak_time", species.species, True), "{:.0f}"),
-                ColumnSpec(f"tox:{species.species}:erpg", f"{name} ERPG-3 (ppm)",
-                           _species_getter("erpg_3", species.species, True), "{:.3f}"),
-                ColumnSpec(f"tox:{species.species}:percent_erpg", f"{name} % of ERPG-3",
-                           _species_getter("percent_of_erpg_3", species.species, True), "{:.1f}"),
-            ])
+        toxic_species.update(dict.fromkeys(species.species for species in summary.toxic_species))
+    for species in toxic_species:
+        name = species.upper()
+        columns.extend([
+            ColumnSpec(f"tox:{species}:peak_ppm", f"{name} Peak (ppm)",
+                       _species_getter("peak_ppm", species, True), "{:.1f}",
+                       _species_getter("percent_of_erpg_3", species, True), "ERPG3"),
+            ColumnSpec(f"tox:{species}:peak_vv", f"{name} Peak (v/v%)",
+                       _species_getter("peak_vv", species, True), "{:.4f}"),
+            ColumnSpec(f"tox:{species}:peak_mgl", f"{name} Peak (mg/L)",
+                       _species_getter("peak_mgl", species, True), "{:.4f}"),
+            ColumnSpec(f"tox:{species}:peak_time", f"{name} Time of Peak (s)",
+                       _species_getter("peak_time", species, True), "{:.0f}"),
+            ColumnSpec(f"tox:{species}:erpg", f"{name} ERPG-3 (ppm)",
+                       _species_getter("erpg_3", species, True), "{:.3f}"),
+            ColumnSpec(f"tox:{species}:percent_erpg", f"{name} % of ERPG-3",
+                       _species_getter("percent_of_erpg_3", species, True), "{:.1f}"),
+        ])
 
     for summary in summaries:
         for species in summary.flammable_species:
@@ -109,7 +125,8 @@ def _species_columns(summaries):
                 ColumnSpec(f"flam:{species.species}:peak_vv", f"{name} Peak (v/v%)",
                            _species_getter("peak_vv", species.species, False), "{:.4f}"),
                 ColumnSpec(f"flam:{species.species}:peak_ppm", f"{name} Peak (ppm)",
-                           _species_getter("peak_ppm", species.species, False), "{:.0f}"),
+                           _species_getter("peak_ppm", species.species, False), "{:.0f}",
+                           _species_percent_lfl(species.species), "LFL"),
                 ColumnSpec(f"flam:{species.species}:peak_mgl", f"{name} Peak (mg/L)",
                            _species_getter("peak_mgl", species.species, False), "{:.4f}"),
                 ColumnSpec(f"flam:{species.species}:peak_time", f"{name} Time of Peak (s)",
@@ -127,8 +144,7 @@ def build_columns(summaries):
 class ResultsTableDialog(QDialog):
     """Scenario x result-type comparison table built from stored ResultSummaries."""
 
-    DEFAULT_COLUMN_KEYS = ("peak_flam_vv", "peak_flam_time", "lfl_percent",
-                           "peak_percent_lfl", "lfl_crossing")
+    DEFAULT_COLUMN_KEYS = tuple(f"tox:{species}:peak_ppm" for species in DEFAULT_TOXIC_SPECIES)
 
     def __init__(self, parent, scenarios):
         super().__init__(parent)
@@ -154,6 +170,12 @@ class ResultsTableDialog(QDialog):
         lists_row.addWidget(self._titled("Result Types", self.column_list))
         layout.addLayout(lists_row)
 
+        self.include_threshold_text = QCheckBox("Include ERPG-3 / LFL percentages in ppm cells")
+        self.include_threshold_text.setToolTip(
+            "Append threshold percentages to peak ppm results, including copied text. "
+            "Toxic species use ERPG-3; flammable species use their own LFL.")
+        layout.addWidget(self.include_threshold_text)
+
         self.table = QTableWidget()
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -168,14 +190,19 @@ class ResultsTableDialog(QDialog):
         copy_table_button = QPushButton("Copy Table")
         copy_table_button.setToolTip("Copy the whole table to the clipboard as tab-separated text.")
         copy_table_button.clicked.connect(self._copy_table)
+        copy_word_button = QPushButton("Copy for Word")
+        copy_word_button.setToolTip("Copy the whole table with cell structure for pasting into Word.")
+        copy_word_button.clicked.connect(self._copy_table_for_word)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         buttons.addButton(copy_table_button, QDialogButtonBox.ActionRole)
+        buttons.addButton(copy_word_button, QDialogButtonBox.ActionRole)
         layout.addWidget(buttons)
 
         self.scenario_list.itemChanged.connect(self._rebuild_table)
         self.column_list.itemChanged.connect(self._rebuild_table)
+        self.include_threshold_text.toggled.connect(self._rebuild_table)
 
         self.resize(1000, 700)
         self._rebuild_table()
@@ -230,6 +257,12 @@ class ResultsTableDialog(QDialog):
         for row, scenario in enumerate(scenarios):
             for column_index, column in enumerate(columns):
                 text = _format(column.value(scenario.summary), column.fmt)
+                if (self.include_threshold_text.isChecked()
+                        and column.reference_percent is not None and text != NOT_AVAILABLE):
+                    percent = column.reference_percent(scenario.summary)
+                    text += " ppm"
+                    if percent is not None:
+                        text += f" {percent:.1f}% of {column.reference_label}"
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(row, column_index, item)
@@ -265,6 +298,9 @@ class ResultsTableDialog(QDialog):
         self._set_clipboard("\t".join(values), "Copied row to the clipboard.")
 
     def _copy_table(self):
+        self._set_clipboard(self._table_text(), "Copied the whole table to the clipboard.")
+
+    def _table_text(self):
         headers = [""] + [self.table.horizontalHeaderItem(col).text()
                           for col in range(self.table.columnCount())]
         lines = ["\t".join(headers)]
@@ -274,7 +310,36 @@ class ResultsTableDialog(QDialog):
             cells += [self.table.item(row, col).text()
                       for col in range(self.table.columnCount())]
             lines.append("\t".join(cells))
-        self._set_clipboard("\n".join(lines), "Copied the whole table to the clipboard.")
+        return "\n".join(lines)
+
+    def _copy_table_for_word(self):
+        headers = [""] + [self.table.horizontalHeaderItem(col).text()
+                          for col in range(self.table.columnCount())]
+        rows = [headers]
+        for row in range(self.table.rowCount()):
+            name = self.table.verticalHeaderItem(row)
+            rows.append([name.text() if name else ""] + [
+                self.table.item(row, col).text()
+                for col in range(self.table.columnCount())
+            ])
+
+        html_rows = []
+        for row_index, row in enumerate(rows):
+            tag = "th" if row_index == 0 else "td"
+            cells = "".join(f"<{tag}>{escape(value)}</{tag}>" for value in row)
+            html_rows.append(f"<tr>{cells}</tr>")
+        html_table = (
+            "<html><body><table border=\"1\" "
+            "style=\"border-collapse:collapse\"><tbody>"
+            + "".join(html_rows)
+            + "</tbody></table></body></html>"
+        )
+
+        mime_data = QMimeData()
+        mime_data.setHtml(html_table)
+        mime_data.setText(self._table_text())
+        QApplication.clipboard().setMimeData(mime_data)
+        self.status_label.setText("Copied the table with Word-compatible cell structure.")
 
     def keyPressEvent(self, event):
         if event.matches(QKeySequence.Copy) and self.table.hasFocus():

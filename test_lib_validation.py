@@ -12,7 +12,7 @@ from information import (
     CALC_METHOD_MODULE_CAPACITY,
     CALC_METHOD_MODULE_VARIABLE_FLOWRATE,
     CALC_METHOD_MODULE_VOLUME_UL9540A,
-    CHEMICAL_PROPERTIES, FlowrateProfile, LIBInputs, LIBSpec,
+    CHEMICAL_PROPERTIES, FlowrateProfile, LIBInputs, LIBSpec, MAX_CALC_DURATION_S,
 )
 from lib_validation import input_problems, release_problems
 from main import ScenarioInputDialog
@@ -24,6 +24,13 @@ from venting_calculation import (
 
 
 class InputValidationTests(unittest.TestCase):
+    def test_calculation_duration_is_bounded_to_three_days(self):
+        self.assertEqual(input_problems(LIBInputs(calc_duration=MAX_CALC_DURATION_S)), [])
+        problems = input_problems(LIBInputs(calc_duration=MAX_CALC_DURATION_S + 1))
+        self.assertIn(
+            f"Calculation Duration must not exceed {MAX_CALC_DURATION_S:g}.", problems,
+        )
+
     def test_default_and_zero_ventilation_inputs_are_valid(self):
         self.assertEqual(input_problems(LIBInputs()), [])
         self.assertEqual(input_problems(LIBInputs(
@@ -80,6 +87,13 @@ class InputValidationTests(unittest.TestCase):
         spec = LIBSpec()
         release = build_module_release(Scenario(1, inputs, lib_spec=spec))
         with self.assertRaisesRegex(ValueError, "Units must be a whole number"):
+            system_propagation(inputs, spec, release)
+
+    def test_propagation_rejects_duration_above_limit_before_allocation(self):
+        inputs = LIBInputs(calc_duration=MAX_CALC_DURATION_S + 1)
+        spec = LIBSpec()
+        release = build_module_release(Scenario(1, inputs, lib_spec=spec))
+        with self.assertRaisesRegex(ValueError, "Calculation Duration"):
             system_propagation(inputs, spec, release)
 
 

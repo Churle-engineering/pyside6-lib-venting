@@ -12,7 +12,7 @@ import numpy as np
 from PySide6.QtWidgets import QApplication, QCheckBox
 
 from information import CHEMICAL_PROPERTIES, FlowrateProfile, GasComposition, LIBInputs, LIBSpec
-from main import BaseWindow, LIBPage, PoolSpillPage, SprinklerPage
+from main import BaseWindow, LIBPage, PoolSpillPage, ReceptorHeatFlux, SprinklerPage
 from saveload import apply_state, collect_state, load_program_state, save_program_state
 from scenario_model import GasResults, ScenarioResult
 from venting_calculation import summarize_result
@@ -31,7 +31,7 @@ class SessionTests(unittest.TestCase):
         window = BaseWindow()
         for name, page_type in (
             ("LIBPage", LIBPage), ("SprinklerPage", SprinklerPage),
-            ("PoolSpillPage", PoolSpillPage),
+            ("PoolSpillPage", PoolSpillPage), ("ReceptorHeatFluxPage", ReceptorHeatFlux),
         ):
             window.add_page(name, page_type(window))
         self.windows.append(window)
@@ -104,9 +104,10 @@ class SessionTests(unittest.TestCase):
 
     def test_pool_inputs_and_optional_visibility_round_trip(self):
         page = self.window.page["PoolSpillPage"]
+        page.ground_conditions.setCurrentText("Custom")
         for name, value in (
-            ("kinematic_viscosity", "0.000001"), ("pool_depth", "0.02"),
-            ("operator_intervention_time", "10"), ("average_evaporation_rate", "0.001"),
+            ("pool_depth", "0.02"),
+            ("operator_intervention_time", "10"),
         ):
             getattr(page, name).setText(value)
         page.oi_tickbox.setChecked(True)
@@ -116,10 +117,17 @@ class SessionTests(unittest.TestCase):
         apply_state(target, json.loads(json.dumps(collect_state(self.window))))
         restored = target.page["PoolSpillPage"]
         self.assertEqual(restored.pool_depth.text(), "0.02")
-        self.assertEqual(restored.kinematic_viscosity.text(), "0.000001")
+        self.assertEqual(restored.ground_conditions.currentText(), "Custom")
+        self.assertFalse(restored.pool_depth.isReadOnly())
+        self.assertFalse(hasattr(restored, "kinematic_viscosity"))
         self.assertTrue(restored.pool_fire_tickbox.isChecked())
         self.assertFalse(restored.optional_group.isHidden())
         self.assertEqual(restored.results_label.text(), page.results_label.text())
+        page.ground_conditions.setCurrentText("rough")
+        apply_state(target, json.loads(json.dumps(collect_state(self.window))))
+        self.assertEqual(restored.ground_conditions.currentText(), "rough")
+        self.assertEqual(restored.pool_depth.text(), "0.02")
+        self.assertTrue(restored.pool_depth.isReadOnly())
 
     def test_sprinkler_result_and_navigation_round_trip(self):
         page = self.window.page["SprinklerPage"]
@@ -136,6 +144,57 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(restored.results_label.text(), "Saved sprinkler result")
         self.assertIs(target.current_page(), restored)
         self.assertEqual(target.page_history, [])
+
+    def test_sprinkler_calculation_inputs_and_history_round_trip(self):
+        page = self.window.page["SprinklerPage"]
+        for name, value in (("sprinkler_id", "SPK-7"), ("sprinkler_rti", "50"),
+                            ("activation_temperature", "68"), ("ceiling_height", "3"),
+                            ("radial_distance", "2"), ("ambient_temperature", "20")):
+            getattr(page, name).setText(value)
+        page.fire_growth_rate.setCurrentIndex(page.fire_growth_rate.count() - 1)
+        page.run_sprinkler_calc()
+        page.run_sprinkler_calc()
+        target = self.make_window()
+        apply_state(target, json.loads(json.dumps(collect_state(self.window))))
+        restored = target.page["SprinklerPage"]
+        self.assertEqual(restored.result_history, page.result_history)
+        self.assertIn("detector_temperature_c", restored.result_history[0])
+        self.assertEqual(restored.last_activation_time_s, page.last_activation_time_s)
+        self.assertEqual(restored.history_table.rowCount(), 2)
+        self.assertEqual(restored.latest_value_label.text(), page.latest_value_label.text())
+        self.assertEqual(restored.results_label.text(), page.results_label.text())
+        self.assertEqual(restored.sprinkler_id.text(), "SPK-7")
+        self.assertEqual(restored.fire_growth_rate.currentText(), page.fire_growth_rate.currentText())
+
+    def test_receptor_heat_flux_inputs_units_and_history_round_trip(self):
+        page = self.window.page["ReceptorHeatFluxPage"]
+        page.input_mode.setCurrentText(page.MODE_TEMPERATURE)
+        page.distance_mode.setCurrentText(page.DISTANCE_RANGE)
+        page.receptor_id.setText("R-9")
+        for name, value in (("emitter_temperature", "1000"), ("emissivity", "0.9"),
+                            ("range_start", "1"), ("range_end", "3"), ("range_step", "1")):
+            getattr(page, name).setText(value)
+        page._set_units([("Unit A", "5", "2"), ("Unit B", "4", "1")])
+        page.plot_height.setValue(500)
+        page.plot_width.setValue(800)
+        page.run_heat_flux_calc()
+        self.assertEqual(len(page.result_history), 6)
+        target = self.make_window()
+        apply_state(target, json.loads(json.dumps(collect_state(self.window))))
+        restored = target.page["ReceptorHeatFluxPage"]
+        self.assertEqual(restored.result_history, page.result_history)
+        self.assertEqual(restored._unit_rows(), [("Unit A", "5", "2"), ("Unit B", "4", "1")])
+        self.assertEqual(restored.input_mode.currentText(), page.MODE_TEMPERATURE)
+        self.assertEqual(restored.distance_mode.currentText(), page.DISTANCE_RANGE)
+        self.assertEqual(restored.emitter_temperature.text(), "1000")
+        self.assertEqual(restored.range_end.text(), "3")
+        self.assertEqual((restored.plot_height.value(), restored.plot_width.value()), (500, 800))
+        self.assertEqual(restored.history_table.rowCount(), 6)
+        self.assertEqual(restored.latest_value_label.text(), page.latest_value_label.text())
+        self.assertEqual(restored.results_label.text(), page.results_label.text())
+        self.assertEqual(len(restored.axes.get_lines()), 2)
+        restored.run_heat_flux_calc()
+        self.assertEqual(restored._latest_run_number(), 2)
 
     def test_plot_visibility_tab_and_tree_selection_round_trip(self):
         scenario = self.populate()
@@ -244,6 +303,10 @@ class SessionTests(unittest.TestCase):
         for pages in (
             [], {"PoolSpillPage": {"widgets": []}},
             {"SprinklerPage": {"session": {"activation_time_s": "bad"}}},
+            {"SprinklerPage": {"session": {"history": [{"rti": "fast"}]}}},
+            {"ReceptorHeatFluxPage": {"session": {"history": [{"run": 1}]}}},
+            {"ReceptorHeatFluxPage": {"session": {"units": [{"name": 5}]}}},
+            {"ReceptorHeatFluxPage": {"session": {"plot_height": "tall"}}},
             {"LIBPage": {"session": {"plots": [{"node_id": []}]}}},
         ):
             with self.subTest(pages=pages), self.assertRaises(ValueError):

@@ -24,7 +24,9 @@ What gets saved:
                        found on the page, captured generically so pages added
                        later (sprinkler, pool spill, receptor heat flux, ...)
                        are saved without touching this module.
-    * Calculator outputs, LIB plot visibility/tab selections and tree selection.
+    * Calculator outputs and results histories (sprinkler activation time and
+      receptor heat flux / view factor runs), the receptor emitter unit table and
+      plot size, LIB plot visibility/tab selections and tree selection.
     * The active theme and page (window geometry remains a user preference).
 
 Forwards / backwards compatibility:
@@ -64,7 +66,7 @@ from information import CHEMICAL_PROPERTIES, FlowrateProfile, GasComposition, LI
 from scenario_model import GasResults, Scenario, ScenarioResult
 
 FORMAT_ID = "lib_offgas_save"
-SAVE_VERSION = 5
+SAVE_VERSION = 6
 DEFAULT_EXTENSION = ".libsave"
 FILE_SAVE_FILTER = "LIB Offgas Save (*.libsave);;JSON files (*.json);;All files (*.*)"
 FILE_OPEN_FILTER = "LIB Offgas Save (*.libsave *.json);;All files (*.*)"
@@ -82,6 +84,21 @@ _DATACLASS_TYPES = {
 # re-bound by name; ScenarioResult battery, composition and flowrate snapshots are saved.
 _TRANSIENT_FIELDS = {
     "Scenario": {"summary", "lib_spec", "gas_composition", "flowrate_profile"},
+}
+
+# Calculator history fields that are number-formatted when the history is redrawn.
+_HISTORY_NUMBER_FIELDS = {
+    # Sprinkler activation time
+    "ceiling_height", "radial_distance", "rti", "activation_temperature",
+    "ambient_temperature", "activation_time_s", "heat_release_rate_kw",
+    "detector_temperature_c", "ceiling_jet_temperature_c", "jet_velocity_mps",
+    # Receptor heat flux / view factor
+    "perp_distance_to_receptor", "received_heat_flux", "view_factor", "emmissive_power",
+    "temp_of_emitter", "emissivity", "length_of_radiating_panel", "width_of_radiating_panel",
+}
+# Fields a page's history redraw reads without a default.
+_HISTORY_REQUIRED_FIELDS = {
+    "ReceptorHeatFluxPage": ("perp_distance_to_receptor", "received_heat_flux"),
 }
 
 
@@ -275,14 +292,44 @@ def _validate_tree(groups):
                 _result_array(gases.densities, (len(gases.labels),))
 
 
-def _validate_session(session):
+def _is_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _validate_history(history, page_name):
+    if not isinstance(history, list):
+        raise ValueError(f"Saved results history for {page_name} must be a list.")
+    required = _HISTORY_REQUIRED_FIELDS.get(page_name, ())
+    for record in history:
+        if not isinstance(record, dict) or any(
+            value is not None and type(value) not in (str, int, float) for value in record.values()
+        ):
+            raise ValueError(f"Saved results history for {page_name} must contain result records.")
+        if any(record.get(key) is not None and not _is_number(record[key])
+               for key in _HISTORY_NUMBER_FIELDS):
+            raise ValueError(f"Saved results for {page_name} contain a non-numeric value.")
+        if any(not _is_number(record.get(key)) for key in required):
+            raise ValueError(f"Saved results for {page_name} are missing calculated values.")
+        if "run" in record and (type(record["run"]) is not int or record["run"] <= 0):
+            raise ValueError("Saved result run numbers must be positive integers.")
+
+
+def _validate_session(session, page_name=""):
     if "results_text" in session and not isinstance(session["results_text"], str):
         raise ValueError("Saved calculator output must be text.")
     activation = session.get("activation_time_s")
-    if activation is not None and (
-        type(activation) not in (int, float) or not math.isfinite(activation) or activation < 0
-    ):
+    if activation is not None and (not _is_number(activation) or activation < 0):
         raise ValueError("Saved sprinkler activation time must be a finite non-negative number.")
+    _validate_history(session.get("history", []), page_name)
+    units = session.get("units", [])
+    if not isinstance(units, list) or any(
+        not isinstance(unit, dict) or any(not isinstance(value, str) for value in unit.values())
+        for unit in units
+    ):
+        raise ValueError("Saved emitter units must be a list of text records.")
+    for name in ("plot_height", "plot_width"):
+        if session.get(name) is not None and type(session[name]) is not int:
+            raise ValueError(f"Saved {name.replace('_', ' ')} must be an integer.")
     for name in ("selected_node_id", "active_result"):
         if session.get(name) is not None and type(session[name]) is not int:
             raise ValueError(f"{name} must be a scenario ID.")
@@ -336,7 +383,7 @@ def apply_state(base_window, state):
                for value in widgets.values()):
             raise ValueError(f"Invalid widget values for {name}.")
         session = _mapping(_decode(entry.get("session", {})), f"Session for {name}")
-        _validate_session(session)
+        _validate_session(session, name)
         if "study_tree" in entry:
             groups = _decode(entry["study_tree"])
             _validate_tree(groups)

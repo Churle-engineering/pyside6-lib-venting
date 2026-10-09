@@ -9,7 +9,8 @@ import numpy as np
 from PySide6.QtWidgets import QApplication, QTabWidget
 
 from dataclass_forms import read_form
-from information import CHEMICAL_PROPERTIES, LIBInputs
+from information import (CALC_METHOD_MODULE_VARIABLE_FLOWRATE, CHEMICAL_PROPERTIES,
+                         LIBInputs)
 from main import ScenarioInputDialog
 from pdf import _dataclass_rows
 from saveload import _decode, _encode
@@ -109,6 +110,31 @@ class EmergencyVentDelaySurfaceTests(unittest.TestCase):
                 self.assertEqual(edited._field_widgets["emergency_vent_delay"].text(), "7.5")
             finally:
                 edited.deleteLater()
+        finally:
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_dependent_dropdown_rows_are_hidden_until_their_method_is_selected(self):
+        dialog = ScenarioInputDialog(None, LIBInputs())
+        try:
+            widgets = dialog._field_widgets
+            composition = widgets["gas_composition"]
+            flowrate = widgets["flowrate_profile"]
+            composition_form = composition.parentWidget().layout()
+            flowrate_form = flowrate.parentWidget().layout()
+
+            self.assertFalse(composition_form.isRowVisible(composition))
+            self.assertFalse(flowrate_form.isRowVisible(flowrate))
+
+            widgets["composition_method"].setCurrentText("User Defined")
+            widgets["calc_method"].setCurrentText(CALC_METHOD_MODULE_VARIABLE_FLOWRATE)
+            self.assertTrue(composition_form.isRowVisible(composition))
+            self.assertTrue(flowrate_form.isRowVisible(flowrate))
+
+            widgets["composition_method"].setCurrentText("Literature Data")
+            widgets["calc_method"].setCurrentIndex(0)
+            self.assertFalse(composition_form.isRowVisible(composition))
+            self.assertFalse(flowrate_form.isRowVisible(flowrate))
         finally:
             dialog.deleteLater()
             self.app.processEvents()
